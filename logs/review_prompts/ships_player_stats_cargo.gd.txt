@@ -1,0 +1,114 @@
+You are reviewing GDScript code for Harvester, a Godot 4 top-down space mining game.
+
+The game uses:
+- A state machine library (State / StateMachine base classes)
+- An Events autoload signal bus (events.gd)
+- An ObjectRegistry autoload for tracking projectiles/effects
+- Steering AI framework (GSAIxxx classes) for enemy movement
+
+IMPORTANT — Godot global singletons (do NOT flag as undefined):
+The following names are globally available at runtime in every script WITHOUT any
+preload() or class_name declaration. Never flag them as "undefined reference",
+"missing import", or similar errors.
+
+Project autoloads (from project.godot [autoload]): Events, ObjectRegistry
+Godot built-in globals (always present): Input, Engine, OS, ProjectSettings,
+  Performance, PhysicsServer2D, RenderingServer, DisplayServer, AudioServer,
+  ResourceLoader, ResourceSaver, Time, ClassDB
+
+If a file references one of these names and the reference looks intentional, emit an
+info-level note instead of an error: use rule "autoload_ref" and message
+"References autoload singleton '<Name>' registered in project.godot" (or "Godot
+built-in singleton" for built-ins). Only emit this when it adds useful context;
+omit it for files that simply use these singletons correctly.
+
+The project context block (if present above the code) shows cross-file dependencies.
+Use it to avoid false positives:
+- Do NOT flag class_names listed in "Available class_names" as undefined
+- Do NOT flag node type mismatches if the scene context shows the correct type
+- Do NOT flag signal issues if the signal is declared in a file listed in the
+  dependency chain
+- If uncertain whether something is a real issue or a cross-file dependency you
+  cannot verify, use severity "warning" not "error"
+
+Severity guide:
+ - error: will crash at runtime or cause data loss
+ - warning: code smell, potential bug, or best practice violation
+ - info: style suggestion or documentation note
+
+If the game is known to run successfully, lean toward "warning" for issues that
+MIGHT cause problems but clearly don't crash the game.
+
+GDScript language rules — DO NOT flag these as errors:
+- `:=` is inferred static typing. `var x := SomeClass.new()` IS type-hinted via
+  inference. Do NOT suggest adding a type annotation when `:=` is already used.
+- `@export var x: PackedScene` IS already type-hinted. The type after `:` is the
+  annotation. Do NOT flag this as "lacks type hint".
+- `@onready var x := $NodePath` IS type-hinted via inference. Do NOT flag this.
+- `var x: TypeName` with no `:=` is also type-hinted. Do NOT flag it.
+- Node paths like `$CollisionShape2D` reference nodes defined in the attached .tscn
+  scene file, NOT in this script. The project context block lists the actual node
+  names and types from the scene. Use ONLY the scene context to validate node
+  references — do NOT guess node types from the node name string alone.
+- If you are unsure whether something is a real error or a GDScript feature you are
+  unfamiliar with, classify it as "warning" not "error".
+
+Review the following file for:
+1. Logic bugs in state machine transitions (missing state cleanup, double-transitions)
+2. Performance: per-frame allocations in _process/_physics_process, repeated get_node() calls
+3. Signal hygiene: signals connected in _ready (good) vs _process (bad), disconnected on exit
+4. Resource leaks: nodes added but never freed, timers not stopped
+5. Type safety: missing type hints on @export vars and function signatures that use neither
+   `:` annotations nor `:=` inference (flag ONLY when BOTH forms are absent)
+6. GDScript style: snake_case, no magic numbers, clear variable names
+
+Note: The project has `gdscript/warnings/unused_signal=false` — do NOT flag unused signals.
+
+File: ships\player\stats_cargo.gd
+
+# === Project context for: ships\player\stats_cargo.gd ===
+# Available class_names (defined elsewhere, usable without preload):
+#   Cargo  →  ships/player/cargo.gd
+#   Stats  →  ships/stats.gd
+# === END project context ===
+=== CODE TO REVIEW BELOW ===
+# Represents a Cargo's stats, like its max space, etc. The stats are calculated from
+# the instance's properties, with modifiers (upgrades) applied to them internally.
+# To access the final stats, use the `get_*` functions, or call `get_stat()`
+class_name StatsCargo
+extends Stats
+
+@export var _max_cargo := 100.0
+@export var _mining_rate := 10.0
+@export var _unload_rate := 35.0
+
+var cargo := 0.0: set = set_cargo
+
+
+func _init() -> void:
+	super()
+	_update_all()
+
+
+func get_max_cargo() -> float:
+	return get_stat("max_cargo")
+
+
+func get_mining_rate() -> float:
+	return get_stat("mining_rate")
+
+
+func get_unload_rate() -> float:
+	return get_stat("unload_rate")
+
+
+func set_cargo(value: float) -> void:
+	cargo = clamp(value, 0.0, get_max_cargo())
+	_update("cargo")
+
+
+Reply with a JSON array of issues (empty array if none):
+[
+  {"line": <int or null>, "severity": "error|warning|info", "rule": "<short tag>", "message": "<description>"}
+]
+Only output the JSON array, nothing else.

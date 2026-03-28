@@ -1,0 +1,168 @@
+You are reviewing GDScript code for Harvester, a Godot 4 top-down space mining game.
+
+The game uses:
+- A state machine library (State / StateMachine base classes)
+- An Events autoload signal bus (events.gd)
+- An ObjectRegistry autoload for tracking projectiles/effects
+- Steering AI framework (GSAIxxx classes) for enemy movement
+
+IMPORTANT — Godot global singletons (do NOT flag as undefined):
+The following names are globally available at runtime in every script WITHOUT any
+preload() or class_name declaration. Never flag them as "undefined reference",
+"missing import", or similar errors.
+
+Project autoloads (from project.godot [autoload]): Events, ObjectRegistry
+Godot built-in globals (always present): Input, Engine, OS, ProjectSettings,
+  Performance, PhysicsServer2D, RenderingServer, DisplayServer, AudioServer,
+  ResourceLoader, ResourceSaver, Time, ClassDB
+
+If a file references one of these names and the reference looks intentional, emit an
+info-level note instead of an error: use rule "autoload_ref" and message
+"References autoload singleton '<Name>' registered in project.godot" (or "Godot
+built-in singleton" for built-ins). Only emit this when it adds useful context;
+omit it for files that simply use these singletons correctly.
+
+The project context block (if present above the code) shows cross-file dependencies.
+Use it to avoid false positives:
+- Do NOT flag class_names listed in "Available class_names" as undefined
+- Do NOT flag node type mismatches if the scene context shows the correct type
+- Do NOT flag signal issues if the signal is declared in a file listed in the
+  dependency chain
+- If uncertain whether something is a real issue or a cross-file dependency you
+  cannot verify, use severity "warning" not "error"
+
+Severity guide:
+ - error: will crash at runtime or cause data loss
+ - warning: code smell, potential bug, or best practice violation
+ - info: style suggestion or documentation note
+
+If the game is known to run successfully, lean toward "warning" for issues that
+MIGHT cause problems but clearly don't crash the game.
+
+GDScript language rules — DO NOT flag these as errors:
+- `:=` is inferred static typing. `var x := SomeClass.new()` IS type-hinted via
+  inference. Do NOT suggest adding a type annotation when `:=` is already used.
+- `@export var x: PackedScene` IS already type-hinted. The type after `:` is the
+  annotation. Do NOT flag this as "lacks type hint".
+- `@onready var x := $NodePath` IS type-hinted via inference. Do NOT flag this.
+- `var x: TypeName` with no `:=` is also type-hinted. Do NOT flag it.
+- Node paths like `$CollisionShape2D` reference nodes defined in the attached .tscn
+  scene file, NOT in this script. The project context block lists the actual node
+  names and types from the scene. Use ONLY the scene context to validate node
+  references — do NOT guess node types from the node name string alone.
+- If you are unsure whether something is a real error or a GDScript feature you are
+  unfamiliar with, classify it as "warning" not "error".
+
+Review the following file for:
+1. Logic bugs in state machine transitions (missing state cleanup, double-transitions)
+2. Performance: per-frame allocations in _process/_physics_process, repeated get_node() calls
+3. Signal hygiene: signals connected in _ready (good) vs _process (bad), disconnected on exit
+4. Resource leaks: nodes added but never freed, timers not stopped
+5. Type safety: missing type hints on @export vars and function signatures that use neither
+   `:` annotations nor `:=` inference (flag ONLY when BOTH forms are absent)
+6. GDScript style: snake_case, no magic numbers, clear variable names
+
+Note: The project has `gdscript/warnings/unused_signal=false` — do NOT flag unused signals.
+
+File: world\spawners\asteroid_spawner.gd
+
+# === Project context for: world\spawners\asteroid_spawner.gd ===
+# Attached to scene: game.tscn
+# Scene node tree (node_name: NodeType):
+#   GameInitializer: Node
+#   GameWorld: Node2D
+#   StationSpawner: Node2D
+#   AsteroidSpawner: Node2D
+#   PirateSpawner: Node2D
+#   UI: CanvasLayer
+#   MapDisplay: TextureRect
+#   AnimationPlayer: AnimationPlayer
+#   AudioStreamPlayer: AudioStreamPlayer
+#   PostProcessedLayer: CanvasLayer
+#   GameView: TextureRect
+#   WorldEnvironment: WorldEnvironment
+# Available class_names (defined elsewhere, usable without preload):
+#   Asteroid  →  world/docking_point/asteroid.gd
+#   AsteroidCluster  →  world/spawners/asteroid_cluster.gd
+# Signals declared here: cluster_depleted
+# Signals emitted here: cluster_depleted
+# === END project context ===
+=== CODE TO REVIEW BELOW ===
+# Dots a cluster of asteroids in the world, reporting the amount of iron added
+# to the world via signals. The asteroids are spawned in groups at a random
+# point inside of an asteroid belt that lies a minimum distance from the player
+# station's spawn point. Most of the logic is just making sure that a cluster
+# doesn't appear too close to another.
+class_name AsteroidSpawner
+extends Node2D
+
+signal cluster_depleted(iron_left)
+
+@export var count_min := 1
+@export var count_max := 5
+
+@export var min_distance_from_station := 800.0
+@export var min_distance_between_clusters := 600.0
+
+@export var cluster_radius := 150.0
+@export var asteroid_radius := 75.0
+@export var randomize_rotation := true
+
+
+# Spawns new asteroids until there's enough resources to mine in the world.
+# The target amount of resources is `iron_amount_balance_level`.
+func spawn_asteroid_clusters(
+	rng: RandomNumberGenerator, target_iron_amount: float, world_radius: float
+) -> float:
+	var spawned_iron := 0.0
+	while spawned_iron < target_iron_amount:
+		var cluster := _spawn_asteroid_cluster(rng, world_radius)
+		spawned_iron += cluster.iron_amount
+	return spawned_iron
+
+
+# Returns the remaining amount of resources to mine on the map.
+func calculate_remaining_iron() -> float:
+	var sum := 0.0
+	for cluster in get_children():
+		sum += cluster.iron_amount
+	return sum
+
+
+# Generates and randomly places a new asteroid cluster, then returns the newly created instance.
+func _spawn_asteroid_cluster(rng: RandomNumberGenerator, world_radius: float) -> AsteroidCluster:
+	var new_cluster: AsteroidCluster
+	while not new_cluster:
+		var spawn_position := (
+			Vector2.UP.rotated(rng.randf_range(0, PI * 2))
+			* rng.randf_range(min_distance_from_station, world_radius)
+		)
+		for cluster in get_children():
+			if (
+				spawn_position.distance_squared_to(cluster.position)
+				< pow(min_distance_between_clusters, 2)
+			):
+				continue
+		new_cluster = _create_cluster(rng, spawn_position)
+		break
+	return new_cluster
+
+
+# Creates, initializes, and returns a new cluster with its asteroids pre-generated
+func _create_cluster(rng: RandomNumberGenerator, spawn_position: Vector2) -> AsteroidCluster:
+	var cluster := AsteroidCluster.new()
+	add_child(cluster)
+	cluster.global_position = spawn_position
+	cluster.spawn_asteroids(rng, count_min, count_max, cluster_radius, asteroid_radius)
+	return cluster
+
+
+func _on_AsteroidCluster_depleted() -> void:
+	cluster_depleted.emit(calculate_remaining_iron())
+
+
+Reply with a JSON array of issues (empty array if none):
+[
+  {"line": <int or null>, "severity": "error|warning|info", "rule": "<short tag>", "message": "<description>"}
+]
+Only output the JSON array, nothing else.

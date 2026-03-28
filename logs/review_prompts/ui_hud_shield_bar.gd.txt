@@ -1,0 +1,129 @@
+You are reviewing GDScript code for Harvester, a Godot 4 top-down space mining game.
+
+The game uses:
+- A state machine library (State / StateMachine base classes)
+- An Events autoload signal bus (events.gd)
+- An ObjectRegistry autoload for tracking projectiles/effects
+- Steering AI framework (GSAIxxx classes) for enemy movement
+
+IMPORTANT — Godot global singletons (do NOT flag as undefined):
+The following names are globally available at runtime in every script WITHOUT any
+preload() or class_name declaration. Never flag them as "undefined reference",
+"missing import", or similar errors.
+
+Project autoloads (from project.godot [autoload]): Events, ObjectRegistry
+Godot built-in globals (always present): Input, Engine, OS, ProjectSettings,
+  Performance, PhysicsServer2D, RenderingServer, DisplayServer, AudioServer,
+  ResourceLoader, ResourceSaver, Time, ClassDB
+
+If a file references one of these names and the reference looks intentional, emit an
+info-level note instead of an error: use rule "autoload_ref" and message
+"References autoload singleton '<Name>' registered in project.godot" (or "Godot
+built-in singleton" for built-ins). Only emit this when it adds useful context;
+omit it for files that simply use these singletons correctly.
+
+The project context block (if present above the code) shows cross-file dependencies.
+Use it to avoid false positives:
+- Do NOT flag class_names listed in "Available class_names" as undefined
+- Do NOT flag node type mismatches if the scene context shows the correct type
+- Do NOT flag signal issues if the signal is declared in a file listed in the
+  dependency chain
+- If uncertain whether something is a real issue or a cross-file dependency you
+  cannot verify, use severity "warning" not "error"
+
+Severity guide:
+ - error: will crash at runtime or cause data loss
+ - warning: code smell, potential bug, or best practice violation
+ - info: style suggestion or documentation note
+
+If the game is known to run successfully, lean toward "warning" for issues that
+MIGHT cause problems but clearly don't crash the game.
+
+GDScript language rules — DO NOT flag these as errors:
+- `:=` is inferred static typing. `var x := SomeClass.new()` IS type-hinted via
+  inference. Do NOT suggest adding a type annotation when `:=` is already used.
+- `@export var x: PackedScene` IS already type-hinted. The type after `:` is the
+  annotation. Do NOT flag this as "lacks type hint".
+- `@onready var x := $NodePath` IS type-hinted via inference. Do NOT flag this.
+- `var x: TypeName` with no `:=` is also type-hinted. Do NOT flag it.
+- Node paths like `$CollisionShape2D` reference nodes defined in the attached .tscn
+  scene file, NOT in this script. The project context block lists the actual node
+  names and types from the scene. Use ONLY the scene context to validate node
+  references — do NOT guess node types from the node name string alone.
+- If you are unsure whether something is a real error or a GDScript feature you are
+  unfamiliar with, classify it as "warning" not "error".
+
+Review the following file for:
+1. Logic bugs in state machine transitions (missing state cleanup, double-transitions)
+2. Performance: per-frame allocations in _process/_physics_process, repeated get_node() calls
+3. Signal hygiene: signals connected in _ready (good) vs _process (bad), disconnected on exit
+4. Resource leaks: nodes added but never freed, timers not stopped
+5. Type safety: missing type hints on @export vars and function signatures that use neither
+   `:` annotations nor `:=` inference (flag ONLY when BOTH forms are absent)
+6. GDScript style: snake_case, no magic numbers, clear variable names
+
+Note: The project has `gdscript/warnings/unused_signal=false` — do NOT flag unused signals.
+
+File: ui\hud\shield_bar.gd
+
+# === Project context for: ui\hud\shield_bar.gd ===
+# Attached to scene: shield_bar.tscn
+# Scene node tree (node_name: NodeType):
+#   ShieldBar: TextureProgressBar
+#   AnimationPlayer: AnimationPlayer
+# Available class_names (defined elsewhere, usable without preload):
+#   PlayerShip  →  ships/player/player_ship.gd
+#   Stats  →  ships/stats.gd
+#   StatsShip  →  ships/player/stats_ship.gd
+# === END project context ===
+=== CODE TO REVIEW BELOW ===
+# Animated shield bar for the Player's ship.
+extends TextureProgressBar
+
+@export var gradient: Gradient
+@export var stats: Resource = preload("res://ships/player/player_stats.tres") as StatsShip
+@export var danger_threshold := 0.3
+
+@onready var tween : Tween
+@onready var anim_player := $AnimationPlayer
+
+
+func initialize(player: PlayerShip) -> void:
+	player.stats.stat_changed.connect(_on_Stats_stat_changed)
+	max_value = player.stats.get_max_health()
+	value = player.stats.get("health")
+	tint_progress = gradient.sample(value / max_value)
+
+
+func _on_Stats_stat_changed(stat: String, value_start: float, current_value: float) -> void:
+	if not stat == "health":
+		return
+	if tween and tween.is_running():
+		tween.kill()
+	tween = create_tween()
+	tween.step_finished.connect(_on_Tween_step_finished)
+	tween.tween_property(
+		self, "value", current_value, 0.25
+	).from(value_start).set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_ELASTIC)
+	tween.play()
+	anim_player.play("damage")
+
+
+func _on_Tween_step_finished(_idx: int) -> void:
+	var shield_ratio := value / max_value
+	var gradient_color := gradient.sample(shield_ratio)
+	tint_progress = gradient_color
+
+	if shield_ratio <= danger_threshold:
+		var anim: Animation = anim_player.get_animation("danger")
+		var final_tint := gradient_color + Color(1.0, 1.0, 1.0, 0.0)
+		anim.track_set_key_value(0, 0, gradient_color)
+		anim.track_set_key_value(0, 1, final_tint)
+		anim_player.play("danger")
+
+
+Reply with a JSON array of issues (empty array if none):
+[
+  {"line": <int or null>, "severity": "error|warning|info", "rule": "<short tag>", "message": "<description>"}
+]
+Only output the JSON array, nothing else.

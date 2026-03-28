@@ -1,0 +1,528 @@
+{
+  "class_names": {
+    "LoopingAudioStreamPlayer2D": "res://common/looping_audio_stream_player_2d.gd",
+    "Stats": "res://ships/stats.gd",
+    "MathUtils": "res://utils/math_utils.gd",
+    "GameWorld": "res://world/game_world.gd",
+    "Asteroid": "res://world/docking_point/asteroid.gd",
+    "DockingPoint": "res://world/docking_point/docking_point.gd",
+    "Station": "res://world/docking_point/station.gd",
+    "TweenAura": "res://world/docking_point/tween_aura.gd",
+    "AsteroidCluster": "res://world/spawners/asteroid_cluster.gd",
+    "AsteroidSpawner": "res://world/spawners/asteroid_spawner.gd",
+    "PirateSpawner": "res://world/spawners/pirate_spawner.gd",
+    "StationSpawner": "res://world/spawners/station_spawner.gd",
+    "MapIcon": "res://ui/minimap/map_icon.gd",
+    "MapSprite": "res://ui/minimap/map_sprite.gd",
+    "MapView": "res://ui/minimap/map_view.gd",
+    "MenuSoundPlayer": "res://ui/menus/sounds/menu_sound_player.gd",
+    "Gun": "res://ships/guns/gun.gd",
+    "AnimatedBar": "res://ships/player/animated_bar.gd",
+    "Cargo": "res://ships/player/cargo.gd",
+    "PlayerShip": "res://ships/player/player_ship.gd",
+    "PlayerState": "res://ships/player/player_state.gd",
+    "StatsCargo": "res://ships/player/stats_cargo.gd",
+    "StatsGun": "res://ships/player/stats_gun.gd",
+    "StatsShip": "res://ships/player/stats_ship.gd",
+    "LaserGun": "res://ships/guns/laser_gun/laser_gun.gd",
+    "Projectile": "res://ships/guns/projectiles/projectile.gd",
+    "PirateShip": "res://ships/enemies/pirate/pirate_ship.gd",
+    "PirateState": "res://ships/enemies/pirate/pirate_state.gd"
+  },
+  "preloads": {
+    "res://ui/cargo_progress.gd": [
+      "res://world/ores/iron_ore.tscn"
+    ],
+    "res://world/spawners/asteroid_cluster.gd": [
+      "res://world/docking_point/asteroid.tscn"
+    ],
+    "res://ui/hud/shield_bar.gd": [
+      "res://ships/player/player_stats.tres"
+    ],
+    "res://ui/minimap/map_view.gd": [
+      "res://ui/minimap/map_sprite.tscn"
+    ],
+    "res://ships/guns/gun.gd": [
+      "res://ships/player/player_gun_stats.tres"
+    ],
+    "res://ships/player/cargo.gd": [
+      "res://ships/player/cargo_stats.tres"
+    ],
+    "res://ships/player/player_ship.gd": [
+      "res://ships/player/player_stats.tres"
+    ]
+  },
+  "autoloads": [
+    "Events",
+    "ObjectRegistry"
+  ],
+  "scene_nodes": {
+    "res://autoload/object_registry.tscn": {
+      "ObjectRegistry": "Node",
+      "Effects": "Node2D",
+      "Projectiles": "Node2D"
+    },
+    "res://main/game.tscn": {
+      "GameInitializer": "Node",
+      "GameWorld": "Node2D",
+      "StationSpawner": "Node2D",
+      "AsteroidSpawner": "Node2D",
+      "PirateSpawner": "Node2D",
+      "UI": "CanvasLayer",
+      "MapDisplay": "TextureRect",
+      "AnimationPlayer": "AnimationPlayer",
+      "AudioStreamPlayer": "AudioStreamPlayer",
+      "PostProcessedLayer": "CanvasLayer",
+      "GameView": "TextureRect",
+      "WorldEnvironment": "WorldEnvironment"
+    },
+    "res://ships/ship.tscn": {
+      "Ship": "CharacterBody2D",
+      "Sprite2D": "Sprite2D",
+      "CollisionShape3D": "CollisionPolygon2D",
+      "MapTransform": "RemoteTransform2D"
+    },
+    "res://ui/cargo_progress.tscn": {
+      "CargoProgress": "ProgressBar",
+      "ArcTop": "TextureProgressBar",
+      "ArcBottom": "TextureProgressBar",
+      "AnimationPlayer": "AnimationPlayer",
+      "Fill": "TextureRect",
+      "AudioUnload": "AudioStreamPlayer",
+      "TextureProgressBar": "TextureProgressBar"
+    },
+    "res://ui/main_menu.tscn": {
+      "MainMenu": "Control",
+      "Background": "Control",
+      "Context": "Control",
+      "Texts": "Control",
+      "HBoxContainer": "HBoxContainer",
+      "Press": "Label",
+      "CenterContainer": "CenterContainer",
+      "AnyKey": "Label",
+      "XboxA": "TextureRect",
+      "PlaystationX": "TextureRect",
+      "NintendoB": "TextureRect",
+      "ToStart": "Label",
+      "FadeLayer": "CanvasLayer"
+    },
+    "res://ui/screen_fader.tscn": {
+      "ScreenFader": "TextureRect"
+    },
+    "res://vfx/background_stars.tscn": {
+      "BackgroundStars": "ParallaxBackground",
+      "ParallaxLayer": "ParallaxLayer",
+      "Stars": "GPUParticles2D",
+      "ParallaxLayer2": "ParallaxLayer"
+    },
+    "res://vfx/distortion_emitter.tscn": {
+      "DistortionEmitter": "GPUParticles2D",
+      "Timer": "Timer"
+    },
+    "res://vfx/distort_mask_view.tscn": {
+      "SubViewportContainer": "SubViewportContainer",
+      "SubViewport": "SubViewport",
+      "CanvasLayer": "CanvasLayer",
+      "BlackBackground": "TextureRect"
+    },
+    "res://vfx/dust_emitter.tscn": {
+      "DustEmitter": "GPUParticles2D"
+    },
+    "res://vfx/move_trail.tscn": {
+      "MoveTrail": "CPUParticles2D"
+    },
+    "res://vfx/pop_effect.tscn": {
+      "PopEffect": "Node2D"
+    },
+    "res://vfx/ripple_emitter.tscn": {
+      "RippleEmitter": "GPUParticles2D",
+      "LifeSpan": "Timer"
+    },
+    "res://vfx/shockwave_emitter.tscn": {
+      "ShockwaveEmitter": "GPUParticles2D",
+      "LifeSpan": "Timer"
+    },
+    "res://world/shaking_camera.tscn": {
+      "Camera2D": "Camera2D",
+      "RemoteMap": "RemoteTransform2D",
+      "RemoteDistort": "RemoteTransform2D"
+    },
+    "res://world/docking_point/asteroid.tscn": {
+      "AnimationPlayer": "AnimationPlayer",
+      "FXAnimationPlayer": "AnimationPlayer",
+      "AudioStreamPlayer": "AudioStreamPlayer"
+    },
+    "res://world/docking_point/docking_point.tscn": {
+      "DockingPoint": "Node2D",
+      "DockingAura": "Sprite2D",
+      "Sprite2D": "Sprite2D",
+      "PlayerRotationRig": "Node2D",
+      "PlayerRotationRemoteTransform": "RemoteTransform2D",
+      "DockingArea": "Area2D",
+      "CollisionShape2D": "CollisionShape2D",
+      "CharacterBody2D": "CharacterBody2D",
+      "MapTransform": "RemoteTransform2D"
+    },
+    "res://world/docking_point/station.tscn": {
+      "Glow": "Sprite2D",
+      "Antenna": "Sprite2D",
+      "Sprite2D": "Sprite2D",
+      "GPUParticles2D": "GPUParticles2D",
+      "AnimationPlayer": "AnimationPlayer",
+      "AudioStreamPlayer2D": "AudioStreamPlayer2D"
+    },
+    "res://world/ores/iron_ore.tscn": {
+      "IronOre": "Sprite2D",
+      "AudioStreamPlayer": "AudioStreamPlayer"
+    },
+    "res://vfx/explosion/explosion.tscn": {
+      "Explosion": "Node2D",
+      "SmokeParticles2D": "GPUParticles2D",
+      "Scraps": "Node2D",
+      "ScrapsParticles2D": "GPUParticles2D",
+      "ScrapsParticles2D2": "GPUParticles2D",
+      "ScrapsParticles2D3": "GPUParticles2D",
+      "ScrapsParticles2D4": "GPUParticles2D",
+      "ScrapsParticles2D5": "GPUParticles2D",
+      "SparkleParticles2D": "GPUParticles2D",
+      "FireBallParticles2D": "GPUParticles2D",
+      "AnimationPlayer": "AnimationPlayer",
+      "AudioStreamPlayer2D": "AudioStreamPlayer2D"
+    },
+    "res://vfx/laser_beam/laser_beam.tscn": {
+      "LaserBeam2D": "RayCast2D",
+      "FillLine2D": "Line2D",
+      "CastingParticles2D": "GPUParticles2D",
+      "BeamParticles2D": "GPUParticles2D",
+      "CollisionParticles2D": "GPUParticles2D"
+    },
+    "res://ui/hud/hud.tscn": {
+      "HUD": "Control"
+    },
+    "res://ui/hud/shield_bar.tscn": {
+      "ShieldBar": "TextureProgressBar",
+      "AnimationPlayer": "AnimationPlayer"
+    },
+    "res://ui/main_screen/main_screen.tscn": {
+      "MainScreen": "Control",
+      "EnvelopeBackground": "TextureRect",
+      "MarginContainer": "MarginContainer",
+      "ColorRect": "ColorRect",
+      "Stars": "GPUParticles2D",
+      "Asteroids": "Node2D",
+      "Asteroid": "Sprite2D",
+      "AnimationPlayer": "AnimationPlayer",
+      "Asteroid2": "Sprite2D",
+      "Asteroid3": "Sprite2D",
+      "Ships": "Node2D",
+      "Player": "Sprite2D",
+      "Enemy": "Sprite2D",
+      "Enemy2": "Sprite2D",
+      "Enemy3": "Sprite2D",
+      "Foreground": "CanvasLayer",
+      "HarvesterLogo": "TextureRect",
+      "Title": "TextureRect",
+      "GDQuestLogo": "TextureButton",
+      "EnvelopeForeground": "TextureRect"
+    },
+    "res://ui/menus/quit_menu.tscn": {
+      "QuitMenu": "MarginContainer",
+      "Panel": "Panel",
+      "VBoxContainer": "VBoxContainer",
+      "Label": "Label",
+      "HBoxContainer": "HBoxContainer",
+      "YesButton": "Button",
+      "NoButton": "Button"
+    },
+    "res://ui/minimap/map_sprite.tscn": {
+      "MapSprite": "Sprite2D"
+    },
+    "res://ui/minimap/map_view.tscn": {
+      "SubViewport": "SubViewport",
+      "Sprites": "Node2D",
+      "CanvasLayer": "CanvasLayer",
+      "BlackBackground": "TextureRect"
+    },
+    "res://ui/menus/sounds/menu_sound_player.tscn": {
+      "MenuSoundPlayer": "AudioStreamPlayer"
+    },
+    "res://ui/menus/upgrades/upgrade_button.tscn": {
+      "UpgradeButton": "TextureButton",
+      "VBoxContainer": "VBoxContainer",
+      "TextureRect": "TextureRect",
+      "Label": "Label",
+      "AnimationPlayer": "AnimationPlayer"
+    },
+    "res://ui/menus/upgrades/upgrade_menu.tscn": {
+      "UpgradeMenu": "Control",
+      "HBoxContainer": "HBoxContainer"
+    },
+    "res://ships/guns/gun.tscn": {
+      "Gun": "Node2D",
+      "Cooldown": "Timer"
+    },
+    "res://ships/player/player_ship.tscn": {
+      "StateMachine": "Node",
+      "Move": "Node",
+      "Travel": "Node",
+      "Dock": "Node",
+      "AudioStreamPlayer": "AudioStreamPlayer",
+      "Precision": "Node",
+      "CameraTransform": "RemoteTransform2D",
+      "MapTimer": "Timer",
+      "Cargo": "Node",
+      "VFX": "Node2D"
+    },
+    "res://ships/player/thrusters_audio_player.tscn": {
+      "ThrustersAudioPlayer": "AudioStreamPlayer2D"
+    },
+    "res://ships/guns/laser_gun/laser_gun.tscn": {
+      "LaserGun": "Node2D"
+    },
+    "res://ships/guns/laser_gun/laser_gun_sounds.tscn": {
+      "LaserGunSounds": "AudioStreamPlayer2D"
+    },
+    "res://ships/guns/projectiles/plasma_shot.tscn": {
+      "PlasmaShot": "CharacterBody2D",
+      "Sprite2D": "Sprite2D",
+      "CollisionShape2D": "CollisionShape2D",
+      "Lifespan": "Timer",
+      "AnimationPlayer": "AnimationPlayer",
+      "DistortionTransform": "RemoteTransform2D",
+      "VisibleOnScreenNotifier2D": "VisibleOnScreenNotifier2D",
+      "AudioStreamPlayer2D": "AudioStreamPlayer2D"
+    },
+    "res://ships/enemies/pirate/pirate_ship.tscn": {
+      "AggroArea": "Area2D",
+      "CollisionShape2D": "CollisionShape2D",
+      "StateMachine": "Node",
+      "Spawn": "Node",
+      "Patrol": "Node",
+      "Rest": "Node",
+      "Attack": "Node"
+    }
+  },
+  "script_to_scene": {
+    "res://autoload/object_registry.gd": "res://autoload/object_registry.tscn",
+    "res://world/game_initializer.gd": "res://main/game.tscn",
+    "res://world/game_world.gd": "res://main/game.tscn",
+    "res://world/spawners/station_spawner.gd": "res://main/game.tscn",
+    "res://world/spawners/asteroid_spawner.gd": "res://main/game.tscn",
+    "res://world/spawners/pirate_spawner.gd": "res://main/game.tscn",
+    "res://ui/ui.gd": "res://main/game.tscn",
+    "res://ui/minimap/map_display.gd": "res://main/game.tscn",
+    "res://vfx/post_process_game_view.gd": "res://main/game.tscn",
+    "res://ui/cargo_progress.gd": "res://ui/cargo_progress.tscn",
+    "res://ui/main_menu.gd": "res://ui/main_menu.tscn",
+    "res://ui/main_menu_texts.gd": "res://ui/main_menu.tscn",
+    "res://ui/screen_fader.gd": "res://ui/screen_fader.tscn",
+    "res://vfx/distortion_emitter.gd": "res://vfx/distortion_emitter.tscn",
+    "res://vfx/pop_effect.gd": "res://vfx/pop_effect.tscn",
+    "res://ships/player/player_camera.gd": "res://world/shaking_camera.tscn",
+    "res://world/docking_point/asteroid.gd": "res://world/docking_point/asteroid.tscn",
+    "res://world/docking_point/docking_point.gd": "res://world/docking_point/docking_point.tscn",
+    "res://world/docking_point/station.gd": "res://world/docking_point/station.tscn",
+    "res://world/ores/iron_ore.gd": "res://world/ores/iron_ore.tscn",
+    "res://vfx/explosion/explosion.gd": "res://vfx/explosion/explosion.tscn",
+    "res://vfx/laser_beam/laser_beam.gd": "res://vfx/laser_beam/laser_beam.tscn",
+    "res://ui/hud/hud.gd": "res://ui/hud/hud.tscn",
+    "res://ui/hud/shield_bar.gd": "res://ui/hud/shield_bar.tscn",
+    "res://ui/main_screen/main_screen.gd": "res://ui/main_screen/main_screen.tscn",
+    "res://ui/minimap/map_sprite.gd": "res://ui/minimap/map_sprite.tscn",
+    "res://ui/minimap/map_view.gd": "res://ui/minimap/map_view.tscn",
+    "res://ships/guns/gun.gd": "res://ships/guns/gun.tscn",
+    "res://ships/player/player_gun.gd": "res://ships/player/player_ship.tscn",
+    "res://ships/player/player_ship.gd": "res://ships/player/player_ship.tscn",
+    "res://libraries/state_machine/state_machine.gd": "res://ships/enemies/pirate/pirate_ship.tscn",
+    "res://ships/player/states/move.gd": "res://ships/player/player_ship.tscn",
+    "res://ships/player/states/travel.gd": "res://ships/player/player_ship.tscn",
+    "res://ships/player/states/dock.gd": "res://ships/player/player_ship.tscn",
+    "res://ships/player/states/precision.gd": "res://ships/player/player_ship.tscn",
+    "res://ships/player/cargo.gd": "res://ships/player/player_ship.tscn",
+    "res://ships/player/vfx.gd": "res://ships/player/player_ship.tscn",
+    "res://ships/player/player_laser_gun.gd": "res://ships/player/player_ship.tscn",
+    "res://ships/guns/projectiles/projectile.gd": "res://ships/guns/projectiles/plasma_shot.tscn",
+    "res://ships/enemies/pirate/pirate_ship.gd": "res://ships/enemies/pirate/pirate_ship.tscn",
+    "res://ships/enemies/pirate/states/spawn.gd": "res://ships/enemies/pirate/pirate_ship.tscn",
+    "res://ships/enemies/pirate/states/patrol.gd": "res://ships/enemies/pirate/pirate_ship.tscn",
+    "res://ships/enemies/pirate/states/rest.gd": "res://ships/enemies/pirate/pirate_ship.tscn",
+    "res://ships/enemies/pirate/states/attack.gd": "res://ships/enemies/pirate/pirate_ship.tscn"
+  },
+  "signal_decls": {
+    "res://autoload/events.gd": [
+      "player_died",
+      "quit_requested",
+      "node_spawned",
+      "station_spawned",
+      "pirate_spawned",
+      "asteroid_spawned",
+      "map_toggled",
+      "upgrade_unlocked",
+      "upgrade_chosen",
+      "damaged",
+      "begin_patrol",
+      "end_patrol",
+      "reached_cluster",
+      "squad_leader_changed",
+      "target_aggroed",
+      "call_off_pursuit",
+      "force_undock",
+      "docked",
+      "undocked",
+      "mine_started",
+      "mine_finished",
+      "explosion_occurred"
+    ],
+    "res://ships/stats.gd": [
+      "stat_changed"
+    ],
+    "res://ui/screen_fader.gd": [
+      "animation_finished"
+    ],
+    "res://world/docking_point/asteroid.gd": [
+      "mined",
+      "depleted"
+    ],
+    "res://world/docking_point/docking_point.gd": [
+      "died"
+    ],
+    "res://world/spawners/asteroid_cluster.gd": [
+      "cluster_depleted"
+    ],
+    "res://world/spawners/asteroid_spawner.gd": [
+      "cluster_depleted"
+    ],
+    "res://ui/menus/upgrades/upgrade_button.gd": [
+      "appeared",
+      "disappeared"
+    ],
+    "res://ships/player/player_ship.gd": [
+      "died"
+    ],
+    "res://ships/player/stats_ship.gd": [
+      "health_depleted"
+    ],
+    "res://ships/enemies/pirate/pirate_ship.gd": [
+      "died",
+      "squad_leader_changed"
+    ]
+  },
+  "signal_emits": {
+    "res://ships/stats.gd": [
+      "stat_changed"
+    ],
+    "res://ui/screen_fader.gd": [
+      "animation_finished"
+    ],
+    "res://world/game_initializer.gd": [
+      "node_spawned",
+      "node_spawned",
+      "node_spawned",
+      "node_spawned"
+    ],
+    "res://world/docking_point/asteroid.gd": [
+      "mined"
+    ],
+    "res://world/docking_point/station.gd": [
+      "upgrade_unlocked"
+    ],
+    "res://world/spawners/asteroid_cluster.gd": [
+      "asteroid_spawned",
+      "cluster_depleted",
+      "cluster_depleted"
+    ],
+    "res://world/spawners/asteroid_spawner.gd": [
+      "cluster_depleted"
+    ],
+    "res://world/spawners/pirate_spawner.gd": [
+      "pirate_spawned"
+    ],
+    "res://world/spawners/station_spawner.gd": [
+      "station_spawned"
+    ],
+    "res://vfx/explosion/explosion.gd": [
+      "explosion_occurred"
+    ],
+    "res://ui/menus/quit_menu.gd": [
+      "quit_requested"
+    ],
+    "res://ui/minimap/map_display.gd": [
+      "map_toggled"
+    ],
+    "res://ui/menus/upgrades/upgrade_button.gd": [
+      "appeared",
+      "disappeared"
+    ],
+    "res://ui/menus/upgrades/upgrade_menu.gd": [
+      "upgrade_chosen"
+    ],
+    "res://ships/player/cargo.gd": [
+      "force_undock",
+      "force_undock",
+      "force_undock",
+      "mine_finished",
+      "mine_started"
+    ],
+    "res://ships/player/player_ship.gd": [
+      "died",
+      "player_died"
+    ],
+    "res://ships/player/stats_ship.gd": [
+      "health_depleted"
+    ],
+    "res://ships/player/states/dock.gd": [
+      "docked",
+      "undocked"
+    ],
+    "res://ships/guns/laser_gun/laser_gun.gd": [
+      "damaged"
+    ],
+    "res://ships/guns/projectiles/projectile.gd": [
+      "damaged"
+    ],
+    "res://ships/enemies/pirate/pirate_ship.gd": [
+      "died",
+      "squad_leader_changed",
+      "target_aggroed",
+      "squad_leader_changed",
+      "target_aggroed"
+    ],
+    "res://ships/enemies/pirate/states/attack.gd": [
+      "call_off_pursuit"
+    ],
+    "res://ships/enemies/pirate/states/patrol.gd": [
+      "end_patrol"
+    ],
+    "res://ships/enemies/pirate/states/rest.gd": [
+      "begin_patrol"
+    ],
+    "res://ships/enemies/pirate/states/spawn.gd": [
+      "reached_cluster",
+      "reached_cluster"
+    ]
+  },
+  "reverse_deps": {
+    "res://world/ores/iron_ore.tscn": [
+      "res://ui/cargo_progress.gd"
+    ],
+    "res://world/docking_point/asteroid.tscn": [
+      "res://world/spawners/asteroid_cluster.gd"
+    ],
+    "res://ships/player/player_stats.tres": [
+      "res://ui/hud/shield_bar.gd",
+      "res://ships/player/player_ship.gd"
+    ],
+    "res://ui/minimap/map_sprite.tscn": [
+      "res://ui/minimap/map_view.gd"
+    ],
+    "res://ships/player/player_gun_stats.tres": [
+      "res://ships/guns/gun.gd"
+    ],
+    "res://ships/player/cargo_stats.tres": [
+      "res://ships/player/cargo.gd"
+    ]
+  },
+  "source_mtime": 1774312186.344051,
+  "built_at": "2026-03-26T20:48:32",
+  "build_seconds": 0.08
+}

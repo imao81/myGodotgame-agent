@@ -48,6 +48,14 @@ from rich.panel import Panel
 
 load_dotenv()
 
+# Windows GBK terminals can't encode glyphs like ▶ — replace them instead of crashing
+if sys.platform == "win32":
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(errors="replace")
+        except Exception:
+            pass
+
 console = Console()
 
 # Bootstrap path so review.py helpers are importable
@@ -170,12 +178,15 @@ def _get_git_changed_files(project_path: Path) -> set[str]:
             return set()
         git_root = Path(r.stdout.strip())
 
+        # Run from git_root so both commands emit root-relative paths:
+        # `git diff --name-only` is root-relative from any cwd, but
+        # `git ls-files` is cwd-relative — mixing them silently drops files.
         r1 = subprocess.run(["git", "diff", "--name-only", "HEAD"],
                              capture_output=True, text=True,
-                             cwd=str(project_path), timeout=10)
+                             cwd=str(git_root), timeout=10)
         r2 = subprocess.run(["git", "ls-files", "--others", "--exclude-standard"],
                              capture_output=True, text=True,
-                             cwd=str(project_path), timeout=10)
+                             cwd=str(git_root), timeout=10)
 
         relevant_exts = {".gd", ".tscn", ".tres"}
         changed: set[str] = set()
@@ -286,19 +297,23 @@ def _check_api_key() -> tuple[Optional[str], Optional[str]]:
         console.log(f"[yellow]  {reason} → static-only mode[/yellow]")
         return "static_only", reason
 
-    # Lightweight connectivity test — one minimal request
+    # Lightweight connectivity test — one minimal request against the model the
+    # pipeline will actually use, so a wrong/unavailable model name fails here
+    # instead of producing 60+ per-file 404s downstream.
     try:
         if provider in ("anthropic", "claude"):
             import anthropic
+            from agents.llm_client import _CLAUDE_TEXT_MODEL
             anthropic.Anthropic(api_key=api_key).messages.create(
-                model="claude-haiku-4-5-20251001",
+                model=_CLAUDE_TEXT_MODEL,
                 max_tokens=1,
                 messages=[{"role": "user", "content": "ping"}],
             )
         elif provider in ("moonshot", "kimi"):
             from openai import OpenAI
+            from agents.llm_client import _KIMI_TEXT_MODEL
             OpenAI(api_key=api_key, base_url="https://api.moonshot.cn/v1").chat.completions.create(
-                model="moonshot-v1-8k",
+                model=_KIMI_TEXT_MODEL,
                 max_tokens=1,
                 messages=[{"role": "user", "content": "ping"}],
             )
@@ -313,8 +328,13 @@ def _check_api_key() -> tuple[Optional[str], Optional[str]]:
         return None, None
     except Exception as e:
         msg = str(e).lower()
-        if "401" in msg or "authentication" in msg or "invalid" in msg or "unauthorized" in msg:
+        if ("401" in msg or "authentication" in msg or "invalid" in msg
+                or "unauthorized" in msg):
             reason = f"{env_var} rejected by {provider} API: {e}"
+            console.log(f"[yellow]  {reason} → static-only mode[/yellow]")
+            return "static_only", reason
+        if "404" in msg or "resource_not_found" in msg or "not found the model" in msg:
+            reason = f"Configured model not available on {provider} account: {e}"
             console.log(f"[yellow]  {reason} → static-only mode[/yellow]")
             return "static_only", reason
         # Transient error (rate-limit, network) — warn but let agents retry
@@ -871,9 +891,13 @@ def report_merger_node(state: GameReport) -> dict:
     )
     has_warnings = any(i.get("final_severity") == "warning" for i in deduplicated)
 
+    # Files that failed review after retries were never analysed — claiming
+    # "green" would be a false pass for the quality gate, so cap at yellow.
+    skipped = state.get("skipped_files", [])
+
     if has_hard_errors:
         overall_health = "red"
-    elif has_warnings:
+    elif has_warnings or skipped:
         overall_health = "yellow"
     else:
         overall_health = "green"
@@ -1002,7 +1026,7 @@ def main() -> None:
 
     if not Path(args.project).exists():
         console.print(f"[red]Project path not found: {args.project}[/red]")
-        sys.exit(1)
+        sys.exit(2)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = Path(args.output) if args.output else Path("reports") / timestamp
@@ -1022,6 +1046,10 @@ def main() -> None:
     console.print(f"\n[bold {color}]Overall health: {health.upper()}[/bold {color}]")
 
     save_report(final_state, output_dir)
+
+    if final_state.get("abort"):
+        sys.exit(2)  # preflight abort — pipeline failure, not a quality verdict
+    sys.exit(1 if health == "red" else 0)
 
 
 if __name__ == "__main__":

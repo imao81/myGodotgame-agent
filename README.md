@@ -11,6 +11,25 @@ Harvester-Agent uses a multi-stage LangGraph pipeline to analyze GDScript code, 
 - **Automated Verification**: Propose-verify pattern to reduce false positives
 - **Cross-Correlation**: Detects root causes across pipeline and code findings
 
+## A Real Bug It Caught
+
+On a full-project run against the Harvester game (62 files, one pass), the pipeline
+came back with a single warning — and it was a genuine bug that had been quietly
+sitting in the audio code:
+
+`LoopingAudioStreamPlayer2D.end()` swaps `stream` to the tail sound and sets
+`ending = true`, but it never calls `play()`. Worse, `_on_finished()` only checks
+whether the current stream is `sound_start` — which it no longer is after `end()`
+reassigns it. So the tail sound is never heard at all, and if `end()` is called
+while the intro is still playing, the loop never kicks in either: the audio just
+goes silent.
+
+It's exactly the kind of bug that survives manual playtesting, because nothing
+crashes and silence is easy to overlook. The verifier marked it "unverifiable"
+(it's a runtime-behavior claim, not something a static index can prove), so it
+landed as a warning instead of an error — which is the honest answer, and still
+enough to put it in front of a human.
+
 ## Architecture
 
 ```text
@@ -145,8 +164,9 @@ MOONSHOT_API_KEY=your-moonshot-key
 ### Basic Usage
 
 > **Windows note:** Activate the venv first (`.venv\Scripts\activate`), then use `python`.
-> If your terminal uses a non-UTF-8 code page (e.g. GBK on Chinese Windows), add `--no-display`
-> to avoid a `UnicodeEncodeError` from the rich console.
+> On non-UTF-8 code pages (e.g. GBK on Chinese Windows) the pipeline reconfigures
+> stdout/stderr with `errors="replace"` — decorative glyphs may render as `?` but
+> the run never crashes on console encoding. `--no-display` only skips visual testing.
 
 ```bash
 # Activate venv (required every new terminal session)
@@ -162,6 +182,20 @@ python game_agent_pipeline.py --project "../godot-2d-space-game/project" --no-di
 # Custom output directory
 python game_agent_pipeline.py --project "../godot-2d-space-game/project" --output "./my-reports"
 ```
+
+### Exit Codes
+
+`game_agent_pipeline.py` exits with a quality-gate code (same convention as `review.py`):
+
+| Code | Meaning |
+|------|---------|
+| `0` | Health is green or yellow |
+| `1` | Health is **red** — verified errors present |
+| `2` | Pipeline failure (bad project path, preflight abort) |
+
+The CI gate in `.github/workflows/pr-gate.yml` relies on this: it runs the pipeline
+on every pull request and fails the job when health is red. Fork PRs without LLM
+secrets automatically degrade to static-only mode and still gate on static errors.
 
 ### Standalone Review Script
 
@@ -300,16 +334,16 @@ harvester-agent/
 | `LLM_FALLBACK` | Enable fallback provider | `0` |
 | `ANTHROPIC_API_KEY` | Claude API key | - |
 | `MOONSHOT_API_KEY` | Kimi API key | - |
+| `KIMI_TEXT_MODEL` | Kimi model for code review | `kimi-k2.7-code` |
+| `KIMI_VISION_MODEL` | Kimi model for screenshots | `moonshot-v1-8k-vision-preview` |
 
 ### Godot Executable
 
-Edit `tools/godot_runner.py`:
+`tools/godot_runner.py` resolves the binary in this order:
 
-```python
-GODOT_EXECUTABLE = (
-    r"C:\Path\To\Godot_v4.x-stable_win64_console.exe"
-)
-```
+1. `GODOT_EXECUTABLE` environment variable (used in CI)
+2. `godot` on `PATH`
+3. Hardcoded local path in `tools/godot_runner.py` (edit it to match your install)
 
 ### Pipeline Options
 

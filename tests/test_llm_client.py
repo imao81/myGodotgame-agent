@@ -31,8 +31,14 @@ def _make_openai_mod(kimi_client=None):
 def _make_anthropic_mod(response_text="ok"):
     """Minimal fake anthropic module with a pre-wired text response."""
     mod = MagicMock()
+
+    class TextBlock:  # real class — _chat_claude filters blocks with isinstance()
+        def __init__(self, text: str):
+            self.text = text
+
+    mod.types.TextBlock = TextBlock
     msg = MagicMock()
-    msg.content = [MagicMock(text=response_text)]
+    msg.content = [TextBlock(text=response_text)]
     mod.Anthropic.return_value.messages.create.return_value = msg
     return mod
 
@@ -129,7 +135,7 @@ class TestLLMClientConstruction(unittest.TestCase):
 class TestModelNames(unittest.TestCase):
 
     def test_kimi_text_model_is_correct(self):
-        self.assertEqual(_KIMI_TEXT_MODEL, "kimi-k2-0905-preview")
+        self.assertEqual(_KIMI_TEXT_MODEL, "kimi-k2.7-code")
 
     def test_claude_text_model_is_correct(self):
         self.assertEqual(_CLAUDE_TEXT_MODEL, "claude-sonnet-4-6")

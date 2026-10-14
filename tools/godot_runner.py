@@ -1,14 +1,18 @@
 """Subprocess wrapper for the Godot CLI."""
 
+import shutil
 import subprocess
 import os
 from pathlib import Path
 
-GODOT_EXECUTABLE = (
+_GODOT_FALLBACK = (
     r"C:\Users\windows\AppData\Local\Microsoft\WinGet\Packages"
     r"\GodotEngine.GodotEngine_Microsoft.Winget.Source_8wekyb3d8bbwe"
     r"\Godot_v4.6.1-stable_win64_console.exe"
 )
+
+# Resolution order: GODOT_EXECUTABLE env var → godot on PATH (CI) → local fallback
+GODOT_EXECUTABLE = os.environ.get("GODOT_EXECUTABLE") or shutil.which("godot") or _GODOT_FALLBACK
 
 
 def run_import(project_path: str, timeout: int = 60) -> dict:

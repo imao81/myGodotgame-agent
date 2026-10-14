@@ -16,10 +16,10 @@ Auto-detection order (when LLM_PROVIDER is unset):
   2. MOONSHOT_API_KEY present  → kimi
   3. Neither present           → claude (fails with clear auth error at call time)
 
-Default models:
+Default models (env-overridable via KIMI_TEXT_MODEL / KIMI_VISION_MODEL):
   Claude text  : claude-sonnet-4-6
   Claude vision: claude-sonnet-4-6
-  Kimi text    : kimi-k2-0905-preview
+  Kimi text    : kimi-k2.7-code
   Kimi vision  : moonshot-v1-8k-vision-preview
 
 Usage:
@@ -63,8 +63,9 @@ if TYPE_CHECKING:
 
 _CLAUDE_TEXT_MODEL = "claude-sonnet-4-6"
 _CLAUDE_VISION_MODEL = "claude-sonnet-4-6"
-_KIMI_TEXT_MODEL = "kimi-k2-0905-preview"
-_KIMI_VISION_MODEL = "moonshot-v1-8k-vision-preview"
+# Model names change over time — env vars override the defaults
+_KIMI_TEXT_MODEL = os.environ.get("KIMI_TEXT_MODEL", "kimi-k2.7-code")
+_KIMI_VISION_MODEL = os.environ.get("KIMI_VISION_MODEL", "moonshot-v1-8k-vision-preview")
 
 
 # ── Provider resolution ────────────────────────────────────────────────────────

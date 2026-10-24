@@ -16,7 +16,8 @@ Schema emitted
                                     nodes, script_path } },
   "autoloads": { "Events": "res://autoload/events.gd", ... },
   "class_names":       { "ClassName": "res://...gd" },
-  "signal_signatures": { "res://...gd": { "signal_name": ["arg: Type", ...] } }
+  "signal_signatures": { "res://...gd": { "signal_name": ["arg: Type", ...] } },
+  "files":             [ "res://...", ... ]   # every project file (dot-dirs excluded)
 }
 
 Usage
@@ -400,6 +401,16 @@ def build_project_index(project_path: str | Path) -> dict:
         text = _read(tscn_path)
         scenes[res] = _parse_tscn(res, text, scripts)
 
+    # ── 4. Full file listing (for file_not_exists verification) ───────────────
+    files: list[str] = []
+    for p in sorted(root.rglob("*")):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(root)
+        if any(part.startswith(".") for part in rel.parts):
+            continue  # skip .godot/, .git/, etc.
+        files.append("res://" + rel.as_posix())
+
     elapsed = round(time.perf_counter() - t0, 3)
 
     return {
@@ -411,6 +422,7 @@ def build_project_index(project_path: str | Path) -> dict:
         "autoloads": autoloads,
         "class_names": class_names,
         "signal_signatures": signal_signatures,
+        "files": files,
     }
 
 

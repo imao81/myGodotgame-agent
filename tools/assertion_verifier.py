@@ -22,11 +22,12 @@ Supported assertion types
     method_is_not_async     — checks scripts[file].methods[method].async
     node_type_mismatch      — checks scenes[scene_file].nodes[node_path].type
     identifier_not_defined  — checks class_names + autoloads (+ case-insensitive)
+    signal_not_declared     — checks scripts[file].signals + extends chain
+    node_not_found          — checks scenes[scene_file].nodes ($ / % / nested leaf)
+    file_not_exists         — checks the full files[] listing in the index
 
-Stubs (always return unverifiable):
-    signal_not_declared
-    node_not_found
-    file_not_exists
+Stub (always returns unverifiable):
+    unverifiable            — the LLM's explicit opt-out type
 """
 
 from __future__ import annotations
@@ -348,11 +349,169 @@ def _verify_identifier_not_defined(a: dict, index: dict) -> dict:
     )
 
 
-# ── Stubs ──────────────────────────────────────────────────────────────────────
+# ── Handler: signal_not_declared ──────────────────────────────────────────────
 
-def _stub(assertion_type: str) -> dict:
+def _verify_signal_not_declared(a: dict, index: dict) -> dict:
+    """Verify that a signal is NOT declared in a script or its ancestors.
+
+    Walks the extends chain via class_names.  Engine built-in signals (e.g.
+    ``finished``) are not indexed, so "confirmed" here means "not declared in
+    any script in the inheritance chain" — stated honestly in the details.
+
+    Assertion fields:
+        signal_name  str  — the signal the LLM claims is missing
+        file         str  — res:// path of the script where it should be declared
+    """
+    signal_name: str = a.get("signal_name", "")
+    file: str = a.get("file", "")
+
+    if not signal_name:
+        return _unverifiable("assertion missing 'signal_name' field")
+    if not file:
+        return _unverifiable("assertion missing 'file' field")
+    if not file.startswith("res://"):
+        file = "res://" + file.lstrip("/")
+
+    scripts: dict = index.get("scripts", {})
+    script = scripts.get(file)
+    if script is None:
+        return _unverifiable(
+            f"script '{file}' not in index; cannot check signal declarations"
+        )
+
+    # Walk the extends chain (extends may be a class_name → ancestor script)
+    class_names: dict = index.get("class_names", {})
+    visited: set[str] = set()
+    current = script
+    current_path: str | None = file
+
+    while current is not None and current_path is not None and current_path not in visited:
+        visited.add(current_path)
+        if signal_name in current.get("signals", []):
+            where = (
+                "in the script itself" if current_path == file
+                else f"in ancestor script '{current_path}'"
+            )
+            return _refuted(
+                f"signal '{signal_name}' IS declared {where}",
+                confidence=0.97,
+            )
+        extends = current.get("extends")
+        parent_path = class_names.get(extends) if extends else None
+        current = scripts.get(parent_path) if parent_path else None
+        current_path = parent_path
+
+    # Not declared anywhere in the script chain — check for a typo near-match
+    close = next(
+        (s for s in script.get("signals", []) if s.lower() == signal_name.lower()),
+        None,
+    )
+    fix = f"Did you mean '{close}'? (Check capitalisation.)" if close else None
+    return _confirmed(
+        f"signal '{signal_name}' is not declared in '{file}' or its script ancestors "
+        "(engine built-in signals are not indexed)",
+        confidence=0.85,
+        fix=fix,
+    )
+
+
+# ── Handler: node_not_found ────────────────────────────────────────────────────
+
+def _verify_node_not_found(a: dict, index: dict) -> dict:
+    """Verify that a node does NOT exist in a scene.
+
+    The index stores child node names ($ / % prefixed), not full nested paths;
+    for a nested path like ``$HUD/HealthBar`` only the leaf is checked, at
+    reduced confidence.
+
+    Assertion fields:
+        node_path   str  — e.g. "$HealthBar" or "HUD/HealthBar"
+        scene_file  str  — res:// path to the .tscn
+    """
+    node_path: str = a.get("node_path", "")
+    scene_file: str = a.get("scene_file", "")
+
+    if not node_path:
+        return _unverifiable("assertion missing 'node_path' field")
+    if not scene_file:
+        return _unverifiable("assertion missing 'scene_file' field")
+    if not scene_file.startswith("res://"):
+        scene_file = "res://" + scene_file.lstrip("/")
+
+    scene = _scene_entry(scene_file, index)
+    if scene is None:
+        return _unverifiable(f"scene '{scene_file}' not in index; cannot verify node")
+
+    nodes: dict = scene.get("nodes", {})
+
+    nested = "/" in node_path.lstrip("$%")
+    leaf = node_path.rsplit("/", 1)[-1]
+    key = _normalise_node_path(leaf)
+    entry = _lookup_node(key, nodes)
+
+    if entry is not None:
+        note = " (leaf of nested path; parent chain not indexed)" if nested else ""
+        return _refuted(
+            f"Node '{key}' EXISTS in '{scene_file}'{note}",
+            confidence=0.9 if nested else 0.97,
+        )
+
+    similar = _find_similar_nodes(key, nodes)
+    fix = None
+    if similar:
+        best = similar[0]
+        node_type = nodes[best].get("type") or "(inherited)"
+        fix = f"Did you mean {best} (type: {node_type})?"
+    return _confirmed(
+        f"Node '{key}' does not exist in '{scene_file}'. "
+        f"Scene nodes: {list(nodes.keys())}",
+        confidence=0.9 if nested else 0.95,
+        fix=fix,
+    )
+
+
+# ── Handler: file_not_exists ───────────────────────────────────────────────────
+
+def _verify_file_not_exists(a: dict, index: dict) -> dict:
+    """Verify that a res:// file does NOT exist in the project.
+
+    Uses the full ``files`` listing when present (any asset type); falls back
+    to scripts/scenes/autoloads only for indexes built by an older builder.
+
+    Assertion fields:
+        path  str  — res:// path the LLM claims is missing
+    """
+    path: str = a.get("path", "")
+
+    if not path:
+        return _unverifiable("assertion missing 'path' field")
+    if not path.startswith("res://"):
+        path = "res://" + path.lstrip("/")
+
+    files: list = index.get("files", [])
+    if files:
+        if path in files:
+            return _refuted(f"File '{path}' EXISTS in the project", confidence=0.98)
+        base = path.rsplit("/", 1)[-1]
+        same_name = [f for f in files if f.rsplit("/", 1)[-1] == base]
+        fix = f"A file with the same name exists at: {same_name[0]}" if same_name else None
+        return _confirmed(
+            f"File '{path}' does not exist in the project",
+            confidence=0.95,
+            fix=fix,
+        )
+
+    # Legacy index without a file listing — partial check, honest about coverage
+    partial_known = (
+        set(index.get("scripts", {}))
+        | set(index.get("scenes", {}))
+        | set(index.get("autoloads", {}).values())
+    )
+    if path in partial_known:
+        return _refuted(f"File '{path}' EXISTS in the project", confidence=0.98)
     return _unverifiable(
-        f"assertion type '{assertion_type}' is not yet implemented in the verifier"
+        f"'{path}' not among indexed scripts/scenes, but this index has no full "
+        "file listing — rebuild the index to verify asset paths"
     )
 
 
@@ -362,9 +521,12 @@ _HANDLERS = {
     "method_is_not_async": _verify_method_is_not_async,
     "node_type_mismatch": _verify_node_type_mismatch,
     "identifier_not_defined": _verify_identifier_not_defined,
+    "signal_not_declared": _verify_signal_not_declared,
+    "node_not_found": _verify_node_not_found,
+    "file_not_exists": _verify_file_not_exists,
 }
 
-_STUBS = {"signal_not_declared", "node_not_found", "file_not_exists", "unverifiable"}
+_STUBS = {"unverifiable"}
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────

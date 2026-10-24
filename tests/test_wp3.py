@@ -176,7 +176,7 @@ class TestApplyVerification(unittest.TestCase):
         finding = _make_finding(
             severity="warning",
             assertion={
-                "type": "signal_not_declared",   # stub → always unverifiable
+                "type": "signal_not_declared",   # empty file → unverifiable
                 "signal_name": "__no_signal__",
                 "file": "",
             },
@@ -206,9 +206,7 @@ class TestApplyVerification(unittest.TestCase):
         finding = _make_finding(
             severity="error",
             assertion={
-                "type": "signal_not_declared",   # stub → always unverifiable
-                "signal_name": "damaged",
-                "file": "res://autoload/events.gd",
+                "type": "unverifiable",   # opt-out → always unverifiable
             },
             message=trigger_msg,
             line=45,
@@ -272,7 +270,7 @@ class TestApplyVerification(unittest.TestCase):
 
         for verified_status in ("confirmed", "refuted", "unverifiable"):
             with self.subTest(verified_status=verified_status):
-                # Use signal_not_declared (unverifiable) for simplicity
+                # Empty file field → unverifiable regardless of signal name
                 finding = _make_finding(
                     severity="info",
                     assertion={"type": "signal_not_declared", "signal_name": "x", "file": ""},

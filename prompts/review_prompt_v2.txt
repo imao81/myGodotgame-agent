@@ -64,20 +64,24 @@ Use exactly one assertion per finding.  Choose the type that best matches:
    Example: {"type": "identifier_not_defined", "identifier": "Projectile",
              "suggested_match": ""}
 
-4. signal_not_declared   (static verifier will mark unverifiable — include anyway)
+4. signal_not_declared
+   Use when: a signal is emitted/connected but never declared in the script
+             (or its ancestors).
    Fields:  signal_name (str), file (str, res:// path)
 
-5. node_not_found        (static verifier will mark unverifiable — include anyway)
+5. node_not_found
+   Use when: the code accesses a node path that does not exist in the scene.
    Fields:  node_path (str), scene_file (str, res:// path)
 
-6. file_not_exists       (static verifier will mark unverifiable — include anyway)
+6. file_not_exists
+   Use when: a preload/load/reference points to a file that does not exist.
    Fields:  path (str, res:// path)
 
 7. unverifiable
    Use when: your finding is valid but does NOT match any of types 1–6.
    Fields:  (none required beyond "type")
    IMPORTANT: "unverifiable" findings MUST use severity "warning" or "info", NEVER "error".
-   Only verifiable assertions (types 1–3) can support severity "error".
+   Only verifiable assertions (types 1–6) can support severity "error".
 
 RULE: If your finding does not fit types 1–6, you MUST use type "unverifiable".
 NEVER use a real assertion type with fake/placeholder parameters (e.g. signal_name:

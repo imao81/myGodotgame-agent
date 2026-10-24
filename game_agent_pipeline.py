@@ -96,6 +96,7 @@ class GameReport(TypedDict):
     skipped_files: list[str]              # files that failed review after 3 retries
     meta_findings: list[dict]             # index_gap patterns from cross_correlator
     code_review_errors: list[dict]        # infrastructure errors (auth, rate-limit, timeout)
+    memory_stats: dict                    # ReviewMemory curation/retrieval stats
 
     # Pipeline check (separate — static, no LLM enrichment)
     pipeline_issues: list[dict]
@@ -127,6 +128,7 @@ def _default_state(project_path: str, no_display: bool) -> GameReport:
         skipped_files=[],
         meta_findings=[],
         code_review_errors=[],
+        memory_stats={},
         pipeline_issues=[],
         correlated_findings=[],
         deduplicated_findings=[],
@@ -507,6 +509,7 @@ def _review_one_file_with_retry(
     project_path: Path,
     index: dict,
     provider,
+    memory_hints: list[dict] | None = None,
 ) -> tuple[list[dict], str | None]:
     """Review one file with up to 3 attempts and exponential backoff.
 
@@ -519,7 +522,8 @@ def _review_one_file_with_retry(
 
     for attempt in range(3):
         try:
-            file_findings, err = review_file(gd, project_path, index, provider)
+            file_findings, err = review_file(gd, project_path, index, provider,
+                                             memory_hints=memory_hints)
             if err:
                 last_err = err
                 if attempt < 2:
@@ -601,14 +605,30 @@ def code_review_node(state: GameReport) -> dict:
     all_findings: list[dict] = []
     skipped_files: list[str] = []
 
+    from agents.review_memory import ReviewMemory
+    memory = ReviewMemory(_PIPELINE_ROOT / ".kimi" / "memory")
+    mem_retrieved = 0
+
     for gd in gd_files:
-        file_findings, err = _review_one_file_with_retry(gd, project_path, index, provider)
+        rel = gd.relative_to(project_path).as_posix()
+        mem_hints = memory.retrieve(rel, index)
+        mem_retrieved += bool(mem_hints)
+        file_findings, err = _review_one_file_with_retry(
+            gd, project_path, index, provider, memory_hints=mem_hints or None
+        )
         if err is not None:
-            rel = gd.relative_to(project_path).as_posix()
             console.log(f"[yellow]  Skipping {rel} after 3 failures: {err}[/yellow]")
             skipped_files.append(rel)
         else:
             all_findings.extend(file_findings)
+
+    memory_stats = memory.curate(all_findings, run_id=state.get("timestamp", ""))
+    if memory_stats["added"] or memory_stats["updated"]:
+        console.log(
+            f"[dim]  Memory: {memory_stats['added']} added, "
+            f"{memory_stats['updated']} updated "
+            f"(total {memory_stats['total']})[/dim]"
+        )
 
     n_active = sum(1 for f in all_findings if f.get("final_severity") != "drop")
     n_refuted = sum(1 for f in all_findings if f.get("final_severity") == "drop")
@@ -622,6 +642,7 @@ def code_review_node(state: GameReport) -> dict:
         "findings": all_findings,
         "skipped_files": skipped_files,
         "code_review_errors": [],
+        "memory_stats": {**memory_stats, "files_with_hints": mem_retrieved},
         "agent_status": {"code_review": status},
     }
 
@@ -979,6 +1000,7 @@ def save_report(state: dict, output_dir: Path) -> None:
         "index_path": state.get("index_path", ""),
         "mode": "static_only" if fallback_mode == "static_only" else "full",
         "overall_health": state.get("overall_health", "unknown"),
+        "memory": state.get("memory_stats", {}),
     }
     if fallback_mode == "static_only":
         metadata["degradation_reason"] = state.get("degradation_reason") or "unknown"

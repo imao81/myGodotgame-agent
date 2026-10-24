@@ -309,6 +309,7 @@ def build_prompt(
     code: str,
     index: dict,
     anchor_findings: list[dict] | None = None,
+    memory_hints: list[dict] | None = None,
 ) -> str:
     """Build the formatted LLM review prompt for one file.
 
@@ -319,6 +320,9 @@ def build_prompt(
         reviews the file without any bias toward pre-flagged lines.
         When a list (may be empty): the anti-anchoring instruction is omitted and the
         findings are injected as static-analysis hints for A/B comparison.
+    memory_hints:
+        Verified false-positive patterns from ReviewMemory (past runs).  Injected
+        as their own block, orthogonal to anchor mode.
     """
     template = _load_prompt_template()
     res_path = f"res://{rel_posix}"
@@ -379,9 +383,27 @@ def build_prompt(
     else:
         bias_block = "No static analysis issues were pre-detected for this file.\n\n"
 
+    # Experience memory: verifier-backed false-positive patterns from past runs
+    if memory_hints:
+        mem_lines = "\n".join(
+            f"  - [{m.get('assertion_type', '')}] {m.get('summary', '')} "
+            f"(verifier: {m.get('evidence', {}).get('verifier_status', '')}; "
+            f"seen {m.get('hits', 1)}x)"
+            for m in memory_hints
+        )
+        memory_block = (
+            "KNOWN FALSE-POSITIVE PATTERNS (refuted by the static verifier in past runs):\n"
+            + mem_lines
+            + "\nThese were REFUTED before — do not report them again unless the "
+              "current code clearly differs. Judge the code independently.\n\n"
+        )
+    else:
+        memory_block = ""
+
     return (
         preamble
         + bias_block
+        + memory_block
         + template
         .replace("{filename}", rel_posix)
         .replace("{autoload_list}", autoload_list)
@@ -445,10 +467,12 @@ def review_file(
     index: dict,
     provider: LLMProvider,
     anchor_findings: list[dict] | None = None,
+    memory_hints: list[dict] | None = None,
 ) -> tuple[list[dict], str | None]:
     """Review one file.  Returns (sanitized_findings, error_message_or_None).
 
     anchor_findings: None = anti-anchor mode (default); list = anchor hint mode.
+    memory_hints: verified false-positive patterns from past runs (ReviewMemory).
     """
     rel_posix = gd_path.relative_to(project_root).as_posix()
     try:
@@ -460,7 +484,8 @@ def review_file(
         return [], None   # stub — skip silently
 
     try:
-        prompt = build_prompt(rel_posix, code, index, anchor_findings=anchor_findings)
+        prompt = build_prompt(rel_posix, code, index, anchor_findings=anchor_findings,
+                              memory_hints=memory_hints)
         raw = provider.generate(prompt)
     except Exception as e:
         return [], f"LLM call failed: {e}"
@@ -625,6 +650,7 @@ def run_pipeline(
     reports_base: Path | None = None,
     kimi_dir: Path | None = None,
     anchor_findings_path: Path | None = None,
+    use_memory: bool = True,
 ) -> tuple[list[dict], Path, Path]:
     """Run the full WP1→WP4 pipeline.
 
@@ -635,6 +661,10 @@ def run_pipeline(
         at least "file" and "message" keys, project-relative posix paths).  When
         provided each file's findings are injected into the LLM prompt as hints.
         When None (default) the anti-anchoring instruction is used instead.
+    use_memory:
+        When True (default), retrieve verifier-backed false-positive patterns from
+        ReviewMemory before each file review and curate new outcomes afterwards.
+        Pass False (or --no-memory) for an A/B baseline run.
 
     Returns
     -------
@@ -646,6 +676,11 @@ def run_pipeline(
         reports_base = _AGENT_ROOT / "reports"
     if kimi_dir is None:
         kimi_dir = _AGENT_ROOT / ".kimi"
+
+    memory = None
+    if use_memory:
+        from agents.review_memory import ReviewMemory
+        memory = ReviewMemory(kimi_dir / "memory")
 
     # ── Load anchor findings (grouped by file) ────────────────────────────────
     # anchor_by_file: None → anti-anchor mode; {} or populated → anchor mode
@@ -697,8 +732,10 @@ def run_pipeline(
             _log.info("[%d/%d] reviewing %s", i, len(gd_files), rel)
 
             file_anchor = anchor_by_file.get(rel, []) if anchor_by_file is not None else None
+            mem_hints = memory.retrieve(rel, index) if memory is not None else None
             enriched_file, err = review_file(gd, project_root, index, provider,
-                                             anchor_findings=file_anchor)
+                                             anchor_findings=file_anchor,
+                                             memory_hints=mem_hints)
             if err:
                 _log.warning("[review] %s — %s", rel, err)
                 errors.append(f"{rel}: {err}")
@@ -715,6 +752,15 @@ def run_pipeline(
     # ── Stage 5: filter_refuted — separate drops from main findings ───────────
     refuted_drops = [f for f in all_enriched if f.get("final_severity") == "drop"]
     non_refuted   = [f for f in all_enriched if f.get("final_severity") != "drop"]
+
+    # ── Memory write: curate verifier-backed outcomes into ReviewMemory ───────
+    memory_stats = None
+    if memory is not None:
+        ts_run = datetime.now().strftime("%Y%m%d_%H%M%S")
+        memory_stats = memory.curate(all_enriched, run_id=ts_run)
+        _log.info("[memory] curated: %d added, %d updated, %d skipped (total %d)",
+                  memory_stats["added"], memory_stats["updated"],
+                  memory_stats["skipped"], memory_stats["total"])
 
     # ── Stage 6: findings_dedup — cascading dedup on non-refuted only ─────────
     non_refuted_deduped = deduplicate_cascading(non_refuted)
@@ -740,6 +786,8 @@ def run_pipeline(
         "interrupted":         interrupted,
         "meta_findings_count": len(meta_findings),
     }
+    if memory_stats is not None:
+        meta["memory"] = memory_stats
 
     json_p, md_p = write_reports(
         report_findings, out_dir,
@@ -812,6 +860,11 @@ Examples:
         "--no-anchor", action="store_true", default=True,
         help="(Default) Independent review: inject anti-anchoring instruction so the LLM "
              "analyses every line with equal attention, without prior hints.",
+    )
+    p.add_argument(
+        "--no-memory", action="store_true",
+        help="Disable ReviewMemory (no retrieval injection, no curation). "
+             "Use for A/B baseline runs measuring the memory effect.",
     )
     p.add_argument(
         "--apply-config", metavar="REPORT_JSON",
@@ -899,6 +952,7 @@ def main(argv: list[str] | None = None) -> int:
             review_addons=args.review_addons,
             show_refuted=args.show_refuted,
             anchor_findings_path=anchor_path,
+            use_memory=not args.no_memory,
         )
     except Exception as exc:
         _log.exception("[review] pipeline failed: %s", exc)

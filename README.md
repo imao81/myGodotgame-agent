@@ -250,7 +250,7 @@ reports/20250328_161030/
 Auto-detects and supports:
 
 - **Claude** (Anthropic): `claude-sonnet-4-6`
-- **Kimi** (Moonshot): `kimi-k2-0905-preview`
+- **Kimi** (Moonshot): `kimi-k2.7-code` (env-overridable via `KIMI_TEXT_MODEL`)
 
 Automatic fallback between providers when `LLM_FALLBACK=1`.
 
@@ -293,6 +293,25 @@ Detects systematic refuted-assertion patterns (≥3 files) to identify:
 - Missing index entries
 - Common false positive patterns
 - Context injection gaps
+
+### 7. Experience Memory (Test-Time Learning)
+
+Inspired by [Dynamic Cheatsheet](https://arxiv.org/abs/2504.07952) (EACL 2026),
+with a hard correctness gate DC lacks: only verifier-backed outcomes are stored.
+
+- **Write**: after each run, findings the static verifier **refuted** become
+  `false_positive` memories; **confirmed** ones become `confirmed_pattern`
+  entries. Unverifiable findings are never stored — no ground truth, no memory.
+- **Read**: before reviewing a file, relevant FP patterns are retrieved
+  (TF-IDF cosine × same-file boost × entity-match boost × decay-weighted hits,
+  hard 800-token budget) and injected into the prompt as "known false positives"
+- **Lifecycle**: entries merge by `(assertion_type, entity)`, accumulate hits,
+  decay at 0.95/day, and are archived below an effective-hits threshold
+- **A/B**: `--no-memory` disables retrieval + curation for baseline runs
+- Storage: `.kimi/memory/review_memory.jsonl` (gitignored)
+
+The effect compounds: repeated false positives are progressively suppressed,
+so precision improves with every run instead of resetting each time.
 
 ## Project Structure
 
@@ -362,6 +381,9 @@ harvester-agent/
 
 # Anchor findings from previous run (A/B testing)
 --anchor FINDINGS_JSON
+
+# Disable experience memory (A/B baseline)
+--no-memory
 ```
 
 ## Testing

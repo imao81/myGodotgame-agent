@@ -1,7 +1,8 @@
-"""tests/test_verifier_extended.py — tests for the three previously-stubbed
-assertion verifiers: signal_not_declared, node_not_found, file_not_exists.
+"""tests/test_verifier_extended.py — tests for ALL six concrete assertion
+verifiers with a synthetic index (no dependency on the real game project):
 
-Uses a small synthetic index — does NOT require the real game project.
+  method_is_not_async, node_type_mismatch, identifier_not_defined  (original 3)
+  signal_not_declared, node_not_found, file_not_exists             (added later)
 
 Run:
     python -m pytest tests/test_verifier_extended.py -v
@@ -30,7 +31,10 @@ _INDEX = {
             "class_name": "BaseShip",
             "extends": "CharacterBody2D",
             "signals": ["ship_damaged"],
-            "methods": {},
+            "methods": {
+                "fire": {"async": False, "args": [], "line": 10},
+                "_on_hit": {"async": True, "args": [], "line": 20},
+            },
         },
         "res://ships/player/player_ship.gd": {
             "class_name": "PlayerShip",
@@ -58,6 +62,102 @@ _INDEX = {
         "res://img/laser.png",
     ],
 }
+
+
+class TestMethodIsNotAsync(unittest.TestCase):
+
+    def test_non_async_method_is_confirmed(self):
+        r = verify_assertion(
+            {"type": "method_is_not_async", "target_class": "BaseShip",
+             "method": "fire"}, _INDEX)
+        self.assertEqual(r["status"], "confirmed")
+
+    def test_async_method_is_refuted(self):
+        r = verify_assertion(
+            {"type": "method_is_not_async", "target_class": "BaseShip",
+             "method": "_on_hit"}, _INDEX)
+        self.assertEqual(r["status"], "refuted")
+
+    def test_unknown_method_is_unverifiable(self):
+        r = verify_assertion(
+            {"type": "method_is_not_async", "target_class": "BaseShip",
+             "method": "fly"}, _INDEX)
+        self.assertEqual(r["status"], "unverifiable")
+
+    def test_file_hint_fallback_resolution(self):
+        r = verify_assertion(
+            {"type": "method_is_not_async", "target_class": "",
+             "method": "fire", "file_hint": "ships/base_ship.gd"}, _INDEX)
+        self.assertEqual(r["status"], "confirmed")
+
+    def test_missing_method_field_is_unverifiable(self):
+        r = verify_assertion(
+            {"type": "method_is_not_async", "target_class": "BaseShip"}, _INDEX)
+        self.assertEqual(r["status"], "unverifiable")
+
+
+class TestNodeTypeMismatch(unittest.TestCase):
+
+    _SCENE = "res://ships/player/player_ship.tscn"
+
+    def test_actual_type_matches_is_confirmed(self):
+        r = verify_assertion(
+            {"type": "node_type_mismatch", "node_path": "$Gun",
+             "expected_type": "CollisionShape3D", "actual_type": "Node2D",
+             "scene_file": self._SCENE}, _INDEX)
+        self.assertEqual(r["status"], "confirmed")
+
+    def test_expected_type_matches_is_refuted(self):
+        r = verify_assertion(
+            {"type": "node_type_mismatch", "node_path": "$Gun",
+             "expected_type": "Node2D", "actual_type": "CollisionShape3D",
+             "scene_file": self._SCENE}, _INDEX)
+        self.assertEqual(r["status"], "refuted")
+
+    def test_missing_node_is_confirmed_with_suggestion(self):
+        r = verify_assertion(
+            {"type": "node_type_mismatch", "node_path": "$Gun2",
+             "expected_type": "Node2D", "actual_type": "Node3D",
+             "scene_file": self._SCENE}, _INDEX)
+        self.assertEqual(r["status"], "confirmed")
+
+    def test_unknown_scene_is_unverifiable(self):
+        r = verify_assertion(
+            {"type": "node_type_mismatch", "node_path": "$Gun",
+             "expected_type": "A", "actual_type": "B",
+             "scene_file": "res://nope.tscn"}, _INDEX)
+        self.assertEqual(r["status"], "unverifiable")
+
+
+class TestIdentifierNotDefined(unittest.TestCase):
+
+    def test_defined_class_name_is_refuted(self):
+        r = verify_assertion(
+            {"type": "identifier_not_defined", "identifier": "BaseShip"}, _INDEX)
+        self.assertEqual(r["status"], "refuted")
+
+    def test_registered_autoload_is_refuted(self):
+        r = verify_assertion(
+            {"type": "identifier_not_defined", "identifier": "Events"}, _INDEX)
+        self.assertEqual(r["status"], "refuted")
+
+    def test_case_typo_is_confirmed_with_fix(self):
+        r = verify_assertion(
+            {"type": "identifier_not_defined", "identifier": "baseship"}, _INDEX)
+        self.assertEqual(r["status"], "confirmed")
+        self.assertIn("BaseShip", r["fix_suggestion"])
+
+    def test_truly_unknown_is_confirmed(self):
+        r = verify_assertion(
+            {"type": "identifier_not_defined", "identifier": "Ghost"}, _INDEX)
+        self.assertEqual(r["status"], "confirmed")
+        self.assertIsNone(r["fix_suggestion"])
+
+    def test_llm_suggestion_validated_against_index(self):
+        r = verify_assertion(
+            {"type": "identifier_not_defined", "identifier": "Ship",
+             "suggested_match": "BaseShip"}, _INDEX)
+        self.assertIn("BaseShip", r["fix_suggestion"])
 
 
 class TestSignalNotDeclared(unittest.TestCase):

@@ -1,23 +1,25 @@
 # GEPA Prompt Evolution Report
 
-Winner: candidate 0
-Evolved prompt: `(kept base prompt)`
+Faithful skeleton: per-instance score matrix, acceptance gate,
+Pareto-frontier parent sampling (arXiv 2507.19457 Algorithm 1/2).
 
-## Fitness (full golden set)
+Winner: candidate 1
+Evolved prompt: `D:\VSCodeWorkspace\AI Agent\GameAgent\harvester-agent\prompts\review_prompt_evolved.txt`
+D_pareto files: 12
 
-| Candidate | Fitness | Recall | FP repro | Novel |
-|-----------|--------:|-------:|---------:|------:|
-| 0 (baseline) | -0.2508 | 0.53 | 0.29 | 146 |
-| 0 (winner) | -0.2508 | 0.53 | 0.29 | 146 |
+## Candidates (mean score on D_pareto)
 
-## All candidates
+| ID | Parent | D_pareto mean | Files scored |
+|----|--------|--------------:|-------------:|
+| 0 (baseline) | — | -0.3683 | 28 |
+| 1 | 0 | -0.1650 | 27 |
+| 3 | 1 | -0.3350 | 20 |
+| 4 | 1 | -0.2467 | 20 |
+| 5 | 0 | -0.2517 | 20 |
+| 6 | 0 | -0.2900 | 20 |
 
-| ID | Parent | Mean fitness | Evals |
-|----|--------|-------------:|------:|
-| 0 | — | -0.2508 | 1 |
-| 1 | — | -0.4211 | 2 |
-| 2 | — | -0.3270 | 2 |
-| 3 | 2 | -0.5714 | 1 |
-| 4 | 2 | -0.2976 | 1 |
-| 5 | 2 | -0.2857 | 1 |
-| 6 | 2 | -0.5893 | 1 |
+## Rejected at the acceptance gate
+
+| ID | Parent | Minibatch mean |
+|----|--------|---------------:|
+| 2 | 0 | +0.1825 |

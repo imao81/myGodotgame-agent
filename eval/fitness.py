@@ -157,6 +157,29 @@ def score_match(match: dict, golden: list[dict]) -> dict:
     }
 
 
+# ── Per-instance scoring (GEPA's Pareto needs instance-level scores) ──────────
+
+def score_files(produced: list[dict], golden: list[dict]) -> dict[str, float]:
+    """Per-file instance score: true_weight − fp_hits − novel penalty.
+
+    Instance = one file. Scores are compared only within the same instance
+    (per-instance Pareto frontier), so files with different numbers of golden
+    records need no cross-file normalisation.
+    """
+    files = {g["file"] for g in golden} | {f.get("file") for f in produced}
+    scores: dict[str, float] = {}
+    for f in files:
+        g_sub = [g for g in golden if g["file"] == f]
+        p_sub = [p for p in produced if p.get("file") == f]
+        m = match_findings(p_sub, g_sub)
+        true_hit = sum(1.0 if g["human_label"] == "tp" else _PARTIAL_WEIGHT
+                       for _, g in m["matched"] if g["human_label"] in _TRUE_LABELS)
+        fp_hit = sum(1 for _, g in m["matched"] if g["human_label"] == "fp")
+        novel_pen = _NOVEL_PENALTY_EACH * min(len(m["novel"]), _NOVEL_PENALTY_CAP)
+        scores[f] = round(true_hit - fp_hit - novel_pen, 4)
+    return scores
+
+
 # ── LLM replay (the only LLM-touching part) ────────────────────────────────────
 
 def replay_with_prompt(
@@ -210,3 +233,59 @@ def feedback_text(scored: dict, match: dict, max_items: int = 8) -> str:
             if g.get("human_notes"):
                 lines.append(f"    human: {g['human_notes'][:140]}")
     return "\n".join(lines)
+
+
+def trace_feedback(produced: list[dict], golden: list[dict],
+                   max_items: int = 6) -> str:
+    """Trace-level feedback: the candidate's OWN findings with their verdicts.
+
+    GEPA reflects on trajectories, not aggregate metrics. Our trajectory is the
+    per-file finding list enriched by the static verifier — plus the golden
+    verdict when the finding matches a labelled record. Four trace categories:
+    what held up (confirmed), what the verifier shot down (refuted), what no
+    human ever saw (novel), and what was missed entirely.
+    """
+    match = match_findings(produced, golden)
+    lines: list[str] = []
+
+    def _fmt(f: dict) -> str:
+        return (f"  - {f.get('file')}:{f.get('line', '?')} "
+                f"[verifier:{f.get('verified', '?')}] "
+                f"{f.get('message', '')[:130]}")
+
+    confirmed = [p for p, g in match["matched"]
+                 if g["human_label"] in _TRUE_LABELS]
+    if confirmed:
+        lines.append("Findings that matched human-confirmed bugs (keep doing this):")
+        lines += [_fmt(f) for f in confirmed[:max_items]]
+
+    fps = [(p, g) for p, g in match["matched"] if g["human_label"] == "fp"]
+    if fps:
+        lines.append("Findings matching human-REJECTED false positives "
+                     "(stop producing these):")
+        for p, g in fps[:max_items]:
+            lines.append(_fmt(p))
+            if g.get("human_notes"):
+                lines.append(f"    human: {g['human_notes'][:150]}")
+
+    refuted_novel = [f for f in match["novel"] if f.get("verified") == "refuted"]
+    if refuted_novel:
+        lines.append("Novel findings the static verifier REFUTED "
+                     "(the prompt asserts things that are statically false):")
+        lines += [_fmt(f) for f in refuted_novel[:max_items]]
+
+    other_novel = [f for f in match["novel"] if f.get("verified") != "refuted"]
+    if other_novel:
+        lines.append(f"Novel findings with no human label: {len(other_novel)} "
+                     f"(sample below — unverifiable volume hurts the score):")
+        lines += [_fmt(f) for f in other_novel[:3]]
+
+    if match["missed"]:
+        lines.append("Human-confirmed bugs the prompt MISSED:")
+        for g in match["missed"][:max_items]:
+            lines.append(f"  - {g.get('file')}:{g.get('line')} — "
+                         f"{g.get('message', '')[:130]}")
+            if g.get("human_notes"):
+                lines.append(f"    human: {g['human_notes'][:150]}")
+
+    return "\n".join(lines) if lines else "No findings produced at all."

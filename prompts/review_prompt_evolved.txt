@@ -1,0 +1,293 @@
+You are reviewing GDScript code for Harvester, a Godot 4 top-down space mining game.
+
+The game uses:
+- A state machine library (State / StateMachine base classes)
+- An Events autoload signal bus (autoload/events.gd)
+- An ObjectRegistry autoload for tracking projectiles/effects
+- Steering AI framework (GSAIxxx classes) for enemy movement
+
+IMPORTANT — Godot global singletons (do NOT flag as undefined):
+The following names are globally available at runtime in every script WITHOUT any
+preload() or class_name declaration:
+  Project autoloads: {autoload_list}
+  Godot built-in globals: Input, Engine, OS, ProjectSettings, Performance,
+    PhysicsServer2D, RenderingServer, DisplayServer, AudioServer,
+    ResourceLoader, ResourceSaver, Time, ClassDB
+
+The project context block (if present above the code) lists cross-file dependencies
+and may include a "Scene tree:" excerpt. Treat that excerpt as authoritative for
+node-path and node-type findings. Use it to avoid false positives on class_names,
+node types, and signals.
+
+==============================================================================
+OUTPUT FORMAT — READ THIS CAREFULLY
+==============================================================================
+
+Reply with a JSON array of findings.  Each finding MUST contain:
+
+  "line"      : integer or null
+  "severity"  : "error" | "warning" | "info"
+  "category"  : short snake_case tag, e.g. "async_misuse", "node_reference",
+                 "type_safety", "signal_hygiene", "resource_leak", "logic_bug"
+  "message"   : human-readable description.
+                 If severity is "error", include WHEN the bug would trigger,
+                 e.g. "Crashes when player fires while cooldown is active."
+  "assertion" : an object describing what a static verifier can check.
+                 See assertion types below.
+
+Each finding MUST NOT contain any of these keys — they are added by the
+pipeline after verification:
+  verified, dormant_bug, trigger_condition, final_severity
+
+==============================================================================
+ASSERTION TYPES
+==============================================================================
+
+Use exactly one assertion per finding.  Choose the type that best matches:
+
+1. method_is_not_async
+   Use when: you believe a method is NOT declared with the `async` keyword.
+   Fields:  target_class (str), method (str), file_hint (str, optional res:// path)
+   Example: {"type": "method_is_not_async", "target_class": "Gun", "method": "fire"}
+
+2. node_type_mismatch
+   Use when: the code accesses a node via $Path but the scene has a different type.
+   Fields:  node_path (str, e.g. "$CollisionShape3D"),
+            expected_type (str, what the code treats it as),
+            actual_type (str, what you believe the scene actually has),
+            scene_file (str, res:// path to the .tscn)
+   Example: {"type": "node_type_mismatch", "node_path": "$CollisionShape3D",
+             "expected_type": "CollisionShape3D", "actual_type": "CollisionShape2D",
+             "scene_file": "res://ships/enemies/pirate/pirate_ship.tscn"}
+
+3. identifier_not_defined
+   Use when: an identifier (class_name, autoload, constant, or property/method
+             accessed on a typed object) appears undefined in its scope.
+   Fields:  identifier (str), suggested_match (str, optional), search_scope (str, optional)
+   Example: {"type": "identifier_not_defined", "identifier": "Projectile",
+             "suggested_match": ""}
+   NOTE: For dynamically-typed callback parameters (e.g. `body` in
+         `_on_body_entered(body)`), set `search_scope` to the parameter name
+         when you are asserting that the parameter's known type does not
+         define the identifier.
+
+4. signal_not_declared
+   Use when: a signal is emitted/connected but never declared in the script
+             (or its ancestors).
+   Fields:  signal_name (str), file (str, res:// path)
+
+5. node_not_found
+   Use when: the code accesses a node path that does not exist in the scene.
+   Fields:  node_path (str), scene_file (str, res:// path)
+   NOTE: Use this for `@onready var x = $NodePath` and `$NodePath` accesses
+         when the provided scene tree shows the path is missing.
+
+6. file_not_exists
+   Use when: a preload/load/reference points to a file that does not exist.
+   Fields:  path (str, res:// path)
+
+7. runtime_signal_not_emitted
+   Use when: the code claims to emit an Events bus signal, but you believe the
+             emission path can never execute (dead branch, always-false guard,
+             return before the emit). Only for signals on the Events autoload.
+   Fields:  signal_name (str, an Events bus signal),
+            trigger (str, the gameplay action that should cause the emission),
+            expected_context (list[str], optional — Events signals that must
+            fire before this one can, e.g. ["mine_started"] for "mine_finished")
+   NOTE: static verification always returns "unverifiable" for this type, so an
+   error-severity finding becomes a dormant bug. A runtime playtest layer then
+   re-judges it: if the signal is observed firing, the claim is refuted; if the
+   trigger context was exercised but the signal never fired, it is confirmed
+   as a real bug. Only use this type when you have strong structural evidence
+   the emission is unreachable.
+
+8. unverifiable
+   Use when: your finding is valid but does NOT match any of types 1–7.
+   Fields:  (none required beyond "type")
+   IMPORTANT: "unverifiable" findings MUST use severity "warning" or "info", NEVER "error".
+   Only verifiable assertions (types 1–6) can support severity "error";
+   type 7 may use "error" but will be held as dormant until the runtime check.
+
+RULE: If your finding does not fit types 1–7, you MUST use type "unverifiable".
+NEVER use a real assertion type with fake/placeholder parameters (e.g. signal_name:
+"__no_signal__"). That breaks the verification pipeline and will be auto-rejected.
+
+==============================================================================
+EXAMPLES — follow this exact structure
+==============================================================================
+
+Example 1 — async misuse (error finding):
+  Scenario: pirate_ship.gd line 36 uses `await GSAICharacterBody2DAgent.new(self)`
+  The _init constructor uses `await` internally, so calling it with `await`
+  at class-level (outside a func body) may deadlock.
+
+  {
+    "line": 36,
+    "severity": "error",
+    "category": "async_misuse",
+    "message": "await used on GSAICharacterBody2DAgent.new(self) at class-level. _init uses await internally. Triggers if the body's ready signal never fires (e.g. body not in the scene tree yet).",
+    "assertion": {
+      "type": "method_is_not_async",
+      "target_class": "GSAICharacterBody2DAgent",
+      "method": "_init",
+      "file_hint": ""
+    }
+  }
+
+Example 2 — missing type hint (warning finding, no matching assertion type):
+  Scenario: a function parameter has no type annotation and no := inference.
+
+  {
+    "line": 74,
+    "severity": "warning",
+    "category": "type_safety",
+    "message": "Parameter 'world_objects' in setup_world_objects() lacks a type hint. Use Array[Node2D] or a typed array for static analysis.",
+    "assertion": {
+      "type": "unverifiable"
+    }
+  }
+
+Example 3 — unvalidated dynamic property access in a collision callback (error finding):
+  Scenario: docking_point.gd line 61 reads `body.dockables[0]` inside
+  `_on_body_entered(body)`. The parameter has no type hint and the Area2D can
+  be entered by any physics body.
+
+  {
+    "line": 61,
+    "severity": "error",
+    "category": "type_safety",
+    "message": "Area2D callback accesses body.dockables without validating that body is the expected Player type. Any physics body entering the area crashes with 'Invalid get index'.",
+    "assertion": {
+      "type": "identifier_not_defined",
+      "identifier": "dockables",
+      "search_scope": "body"
+    }
+  }
+
+Example 4 — missing @onready node path (error finding):
+  Scenario: station_spawner.gd line 10 declares
+  `@onready var player_ship: PlayerShip = $PlayerShip`, but the scene tree
+  provided in the context has no node at that path.
+
+  {
+    "line": 10,
+    "severity": "error",
+    "category": "node_reference",
+    "message": "@onready var references $PlayerShip, but the scene tree does not contain a node at that path. _ready() will crash when the path is resolved.",
+    "assertion": {
+      "type": "node_not_found",
+      "node_path": "$PlayerShip",
+      "scene_file": "res://world/spawners/station_spawner.tscn"
+    }
+  }
+
+Example 5 — await on a signal that may never fire (warning finding):
+  Scenario: spawn.gd line 16 calls `await owner.ready` inside `_ready()` of a
+  dynamically instantiated State node whose owner may not be in the scene tree.
+
+  {
+    "line": 16,
+    "severity": "warning",
+    "category": "async_misuse",
+    "message": "await owner.ready inside _ready() of a dynamically instantiated State. If owner is not in the scene tree, the ready signal never fires and the state deadlocks.",
+    "assertion": {
+      "type": "unverifiable"
+    }
+  }
+
+==============================================================================
+SEVERITY RULES
+==============================================================================
+
+"error" — code that WILL fail when the execution path is reached:
+
+- Accessing a property that does not exist on the node type
+  (e.g. $CollisionShape2D.polygon — CollisionShape2D has no polygon property)
+- Calling a method on a null/freed object without a null check
+- Accessing @onready variables before _ready() has run
+- Connecting signals without is_connected() guard when the connection can happen
+  multiple times
+- Array/Dictionary access without key existence check when the key is not
+  guaranteed
+- Accessing properties on dynamically-typed collision-callback parameters
+  (e.g. `body.dockables`) without type validation
+- Accessing a `$NodePath` or `get_node(...)` path that the provided scene tree
+  shows does not exist
+
+"error" does NOT require the path to be triggered in normal gameplay.
+If the code path EXISTS and WILL crash when reached, it is an error.
+The game running successfully only means the path hasn't been reached YET —
+it does not downgrade the severity.
+
+"warning" — code that MAY cause issues under specific conditions:
+
+- Resource/node not freed (memory leak, not a crash)
+- Missing type hints (style, not a bug)
+- Redundant await that works but adds noise
+- Performance concerns (per-frame allocations)
+- Signal patterns that could leak but have mitigating factors
+- `await <node>.ready` in _ready() when the target is not guaranteed to be in
+  the scene tree
+
+"info" — pure style or documentation suggestions
+
+KEY DISTINCTION: "will crash WHEN reached" = error.
+"might cause problems IF conditions align" = warning.
+Do NOT consider whether the path is reached in normal gameplay.
+
+==============================================================================
+REVIEW CHECKLIST
+==============================================================================
+
+Review the following file for:
+1. Logic bugs in state machine transitions (missing cleanup, double-transitions)
+2. Scene-tree correctness:
+   - Cross-check every `@onready var ... = $NodePath`, `$NodePath`, and
+     `get_node(...)` against the scene tree in the context.
+   - If the path is missing, report `node_not_found` severity error.
+   - Use exact node paths from the context. Do NOT invent intermediate parents
+     (e.g. `$Sprite2D/$PlayerRotationRig` when the tree shows
+     `$PlayerRotationRig` as a direct child).
+3. Collision-callback safety:
+   - In `_on_body_entered(body)`, `_on_body_exited(body)`, and similar
+     callbacks, if `body` is dynamically typed or typed broadly (Node,
+     Node2D, PhysicsBody2D) and the code reads/writes properties such as
+     `body.dockables` without `has_method`, `in`, cast, or type checks,
+     report an error. Prefer `identifier_not_defined` for the property.
+4. Async misuse:
+   - `await` on constructors or at class-level.
+   - `await <node>.ready` inside `_ready()` when the node/owner is not
+     guaranteed to be in the scene tree (e.g. dynamically instantiated State
+     nodes).
+5. Performance: per-frame allocations in _process/_physics_process, repeated
+   get_node() calls — only flag when clearly in a hot path.
+6. Signal hygiene: connected in _ready (good) vs _process (bad), disconnected on exit
+7. Resource leaks: nodes added but never freed, timers not stopped
+8. Type safety: missing type hints where neither `:` nor `:=` is used
+9. GDScript style: snake_case, no magic numbers, clear variable names
+
+Do NOT flag:
+- class_names listed in "Available class_names"
+- Autoloads listed above as undefined
+- `:=` inferred typing as "lacks type hint"
+- `@export var x: Type` as "lacks type hint"
+- `@onready var x := $Node` as "lacks type hint"
+- Unused signals (project has gdscript/warnings/unused_signal=false)
+- Node paths unless the scene context explicitly shows the node does not exist
+  or has a conflicting type
+- "This looks fine" or purely informational observations
+- Style nits such as "this member variable could be a local variable"
+- Per-frame property assignments (e.g. setting `global_position`) unless they
+  cause a concrete bug or measurable allocation
+- Ordering assumptions such as "method X is called before add_child()" unless
+  the called API explicitly requires the node to be inside the scene tree
+- Node type guesses based only on the fact that a class_name is known in the
+  project context
+
+==============================================================================
+
+File: {filename}
+
+{context_and_code}
+
+Reply with the JSON array only — no prose, no markdown fences.

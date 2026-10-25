@@ -25,13 +25,16 @@ from agents.gepa import (
     REQUIRED_PLACEHOLDERS,
     _strip_fences,
     mutate_template,
+    pareto_sample,
     template_is_valid,
 )
 from eval.fitness import (
     feedback_text,
     load_golden,
     match_findings,
+    score_files,
     score_match,
+    trace_feedback,
 )
 
 
@@ -179,6 +182,95 @@ class TestGepaPureLogic(unittest.TestCase):
         sent = provider.generate.call_args.args[0]
         for p in REQUIRED_PLACEHOLDERS:
             self.assertIn(p, sent)  # instruction block survived intact
+
+
+class TestScoreFiles(unittest.TestCase):
+    """Per-instance scores — the data structure the Pareto frontier needs."""
+
+    def test_per_file_independence(self):
+        produced = [
+            {"file": "a.gd", "line": 10,
+             "assertion": {"type": "identifier_not_defined",
+                           "identifier": "_timer"}},
+            {"file": "b.gd", "line": 5,
+             "assertion": {"type": "signal_not_declared",
+                           "signal_name": "docked"}},
+        ]
+        s = score_files(produced, G[:3])
+        self.assertEqual(s["a.gd"], 1.0)    # tp matched
+        self.assertEqual(s["b.gd"], -1.0)   # fp reproduced
+
+    def test_untouched_file_scores_zero(self):
+        self.assertEqual(score_files([], G[:3])["a.gd"], 0.0)
+
+
+class TestParetoSample(unittest.TestCase):
+    """Paper Algorithm 2: per-instance winners, domination removal, sampling."""
+
+    @staticmethod
+    def _cand(cid: int, scores: dict) -> dict:
+        return {"id": cid, "scores": scores}
+
+    def test_each_instance_winner_stays_alive(self):
+        # c1 dominates a.gd, c2 dominates b.gd — greedy mean would kill c2
+        cands = [self._cand(1, {"a.gd": 2.0, "b.gd": 0.0}),
+                 self._cand(2, {"a.gd": -1.0, "b.gd": 3.0}),
+                 self._cand(3, {"a.gd": -5.0, "b.gd": -5.0})]  # wins nothing
+        rng = __import__("random").Random(0)
+        picks = {pareto_sample(cands, ["a.gd", "b.gd"], rng)["id"]
+                 for _ in range(50)}
+        self.assertEqual(picks, {1, 2})  # c3 never picked; both winners survive
+
+    def test_dominated_candidate_removed(self):
+        # c2's win-set {a.gd} is a strict subset of c1's {a.gd, b.gd}
+        cands = [self._cand(1, {"a.gd": 2.0, "b.gd": 2.0}),
+                 self._cand(2, {"a.gd": 2.0, "b.gd": 0.0})]
+        rng = __import__("random").Random(0)
+        picks = {pareto_sample(cands, ["a.gd", "b.gd"], rng)["id"]
+                 for _ in range(30)}
+        self.assertEqual(picks, {1})
+
+    def test_greedy_would_collapse_pareto_does_not(self):
+        """Regression for the first implementation's local-optimum failure."""
+        # c1 has the best MEAN but loses b.gd badly; c2 owns b.gd
+        cands = [self._cand(1, {"a.gd": 2.0, "b.gd": 0.0}),
+                 self._cand(2, {"a.gd": 0.9, "b.gd": 1.0})]
+        greedy = max(cands, key=lambda c: sum(c["scores"].values()))
+        self.assertEqual(greedy["id"], 1)
+        rng = __import__("random").Random(1)
+        picks = {pareto_sample(cands, ["a.gd", "b.gd"], rng)["id"]
+                 for _ in range(50)}
+        self.assertIn(2, picks)  # the b.gd specialist is still sampled
+
+
+class TestTraceFeedback(unittest.TestCase):
+
+    def test_four_trace_categories(self):
+        produced = [
+            {"file": "a.gd", "line": 10, "verified": "confirmed",
+             "message": "found the timer bug",
+             "assertion": {"type": "identifier_not_defined",
+                           "identifier": "_timer"}},
+            {"file": "b.gd", "line": 5, "verified": "confirmed",
+             "message": "claimed docked undeclared",
+             "assertion": {"type": "signal_not_declared",
+                           "signal_name": "docked"}},
+            {"file": "n.gd", "line": 1, "verified": "refuted",
+             "message": "novel but statically false",
+             "assertion": {"type": "unverifiable"}},
+        ]
+        text = trace_feedback(produced, G[:3])
+        self.assertIn("human-confirmed bugs", text)
+        self.assertIn("human-REJECTED", text)
+        self.assertIn("verifier REFUTED", text)
+        self.assertIn("MISSED", text)
+
+    def test_empty_production_reports_misses(self):
+        text = trace_feedback([], G[:3])
+        self.assertIn("MISSED", text)
+
+    def test_truly_empty_is_explicit(self):
+        self.assertEqual(trace_feedback([], []), "No findings produced at all.")
 
 
 if __name__ == "__main__":

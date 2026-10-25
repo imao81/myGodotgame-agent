@@ -462,33 +462,41 @@ verifier replaces human preference labels.
 
 The review prompt is not hand-tuned folklore — it evolves against the
 human-labelled golden set (49 findings over 32 files, each with reviewer
-notes). `agents/gepa.py` implements GEPA-style reflective mutation
-(arXiv 2507.19457):
+notes). `agents/gepa.py` implements the core of GEPA (arXiv 2507.19457,
+Algorithm 1/2), adapted to code review:
 
-1. **Fitness by replay**: a candidate prompt re-reviews the golden-covered
-   files; its findings are matched against human verdicts. Re-discovering a
-   confirmed bug earns recall credit; re-producing a human-rejected false
-   positive costs; novel output carries a small capped noise penalty (its
-   truth is unknowable — the golden set is a labelled finding list, not a
-   bug census, so fitness is precision-oriented by construction).
-2. **Reflective mutation**: the mutator model reads the current template
-   plus feedback naming the exact missed bugs and the humans' reasons for
-   rejecting the reproduced FPs, then rewrites the template. Candidates that
-   lose the `{filename}`/`{autoload_list}`/`{context_and_code}` placeholders
-   are discarded before spending a single evaluation call.
-3. **Cost discipline**: minibatch scoring on a cheap tier
-   (deepseek-v4-flash by default), full-set runoff only for finalists.
+1. **Fitness by replay, per instance**: a candidate prompt re-reviews
+   golden-covered files; findings are matched against human verdicts
+   (file + assertion entity, or line ±3). Scores are tracked **per file** —
+   the instance-level score matrix the Pareto frontier needs.
+2. **Reflective mutation on traces**: the mutator model reads the parent's
+   template plus its *execution traces* — each produced finding annotated
+   with the verifier's verdict, the human-rejection notes for reproduced
+   FPs, and the confirmed bugs it missed — then rewrites the template.
+   Candidates that lose the `{filename}`/`{autoload_list}`/`{context_and_code}`
+   placeholders are discarded before spending a single evaluation call.
+3. **Acceptance gate**: a mutant enters the pool only if it beats its parent
+   on the same minibatch. Rejected mutants never spend a validation pass.
+4. **Pareto parent selection** (not greedy best-mean — the paper shows greedy
+   collapses to local optima): per-instance winners are unioned, dominated
+   candidates removed, and the parent is sampled proportional to win count.
+   A prompt that is the only one that handles a certain file *type* keeps its
+   DNA in the pool even with a mediocre average.
+5. **Cost discipline**: minibatch reflection on a cheap tier
+   (deepseek-v4-flash), per-(candidate, file) replay caching, and the
+   acceptance gate together keep a 6-iteration run around 20 minutes.
 
 ```bash
-python -m agents.gepa --iterations 8 --minibatch 12   # ~25 min
-python -m agents.gepa --dry-run                        # validate setup, no LLM calls
+python -m agents.gepa --iterations 6 --minibatch 8 --pareto-size 12
+python -m agents.gepa --dry-run            # validate setup, no LLM calls
 ```
 
-The winner lands in `prompts/review_prompt_evolved.txt` (never overwrites the
+The winner is written to `prompts/review_prompt_evolved.txt` only if it beats
+the baseline on the held-out `D_pareto` split (never overwrites the
 production prompt automatically); `eval/gepa_report.md` records every
-candidate's lineage and fitness. Simplification vs. the paper: with 32 files
-we use mean-fitness selection plus a full-set runoff rather than a true
-per-instance Pareto front.
+candidate's lineage, gate rejections, and per-instance scores.
+Simplification vs. the paper: System-Aware Merge (crossover between
+complementary candidates) is not yet implemented.
 
 Known limitation: a file with zero findings can't distinguish "genuinely
 clean" from "model looked away" — the verifier only judges what was proposed.

@@ -8,6 +8,8 @@ Graph topology:
   build_index
     ↓
   resolve_scope
+    ↓
+  route_files                     [LinUCB bandit: file → model tier]
     ├────────────────────────────┐
   pipeline_check           code_review   [parallel]
     └────────────────────────────┘
@@ -135,6 +137,11 @@ class GameReport(TypedDict):
     playtest_infra_error: bool            # True = playtest couldn't run (not a verdict)
     fix_verify_results: list[dict]        # playtest re-run after auto_fix (--auto-fix)
 
+    # Model routing (contextual bandit)
+    no_router: bool                       # --no-router: all files use the default model
+    routing_plan: dict                    # file → {"arm", "provider", "model", "context"}
+    routing_stats: dict                   # per-arm pulls/rewards/escalations this run
+
     # Post-correlation & dedup
     correlated_findings: list[dict]       # from cross_correlator
     deduplicated_findings: list[dict]     # from findings_dedup
@@ -153,7 +160,8 @@ class GameReport(TypedDict):
     fix_summary: str
 
 
-def _default_state(project_path: str, no_display: bool, output_dir: str = "") -> GameReport:
+def _default_state(project_path: str, no_display: bool, output_dir: str = "",
+                   no_router: bool = False) -> GameReport:
     return GameReport(
         project_path=str(Path(project_path).resolve()),
         no_display=no_display,
@@ -179,6 +187,9 @@ def _default_state(project_path: str, no_display: bool, output_dir: str = "") ->
         runtime_coverage=[],
         playtest_infra_error=False,
         fix_verify_results=[],
+        no_router=no_router,
+        routing_plan={},
+        routing_stats={},
         correlated_findings=[],
         deduplicated_findings=[],
         agent_status={},
@@ -472,6 +483,98 @@ def resolve_scope_node(state: GameReport) -> dict:
     }
 
 
+# ── Node: route_files ─────────────────────────────────────────────────────────
+
+_ROUTER_DIR = _PIPELINE_ROOT / ".kimi" / "router"
+
+
+def _discover_review_files(project_path: Path, scope: set) -> list:
+    """Shared file discovery for routing + review (excludes the injected harness)."""
+    from review import discover_files as _discover_files
+    gd_files = [f for f in _discover_files(project_path)
+                if f.name != "test_controller.gd"]
+    if scope:
+        gd_files = [
+            f for f in gd_files
+            if f.relative_to(project_path).as_posix() in scope
+            or str(f.relative_to(project_path)) in scope
+        ]
+    return gd_files
+
+
+def route_files_node(state: GameReport) -> dict:
+    """Assign each in-scope file a model tier via the LinUCB contextual bandit.
+
+    Skipped (passthrough to the default model) when: static_only mode,
+    --no-router, or only one arm is available (single provider key).
+    """
+    t0 = time.perf_counter()
+    console.log("[bold cyan]▶ Route Files[/bold cyan]")
+
+    def _skip(reason: str) -> dict:
+        console.log(f"[dim]  {reason} — all files use the default model[/dim]")
+        return {"routing_plan": {}, "routing_stats": {},
+                "agent_status": {"route_files": f"skipped:{reason}"}}
+
+    if state.get("fallback_mode") == "static_only":
+        return _skip("static_only")
+    if state.get("no_router"):
+        return _skip("disabled")
+
+    from agents.router import LinUCB, available_arms, file_features
+    arms = available_arms()
+    if len(arms) <= 1:
+        return _skip("single_arm" if arms else "no_arms")
+
+    project_path = Path(state["project_path"])
+    index = _load_index_from_state(state)
+    try:
+        gd_files = _discover_review_files(project_path, set(state.get("scope", [])))
+    except Exception as e:
+        console.log(f"[red]  File discovery failed: {e}[/red]")
+        return _skip(f"discovery_failed")
+
+    contexts: dict[str, list] = {}
+    for gd in gd_files:
+        rel = gd.relative_to(project_path).as_posix()
+        try:
+            with gd.open(encoding="utf-8", errors="replace") as fh:
+                n_lines = sum(1 for _ in fh)
+        except OSError:
+            n_lines = 0
+        contexts[rel] = file_features(rel, index, n_lines).tolist()
+
+    bandit = LinUCB.load(_ROUTER_DIR / "linucb.json", [a["name"] for a in arms])
+    assignment = bandit.select(contexts)
+    arm_by_name = {a["name"]: a for a in arms}
+    plan = {
+        rel: {"arm": arm_name,
+              "provider": arm_by_name[arm_name]["provider"],
+              "model": arm_by_name[arm_name]["model"],
+              "rel_cost": arm_by_name[arm_name]["rel_cost"],
+              "context": contexts[rel]}
+        for rel, arm_name in assignment.items()
+    }
+
+    dist: dict[str, int] = {}
+    for entry in plan.values():
+        dist[entry["arm"]] = dist.get(entry["arm"], 0) + 1
+    console.log(
+        f"[cyan]  {len(plan)} file(s) routed: "
+        + ", ".join(f"{a}×{n}" for a, n in sorted(dist.items()))
+        + f" ({_elapsed(t0)})[/cyan]"
+    )
+    return {
+        "routing_plan": plan,
+        "routing_stats": {
+            "arms": [a["name"] for a in arms],
+            "assignment": dist,
+            "bandit_pulls_before": dict(bandit.pulls),
+        },
+        "agent_status": {"route_files": f"ok:{len(plan)}_files"},
+    }
+
+
 # ── Node: pipeline_check ──────────────────────────────────────────────────────
 
 def _pipeline_check_fallback(_: dict) -> dict:
@@ -555,19 +658,30 @@ def _review_one_file_with_retry(
     index: dict,
     provider,
     memory_hints: list[dict] | None = None,
-) -> tuple[list[dict], str | None]:
+    provider_for=None,
+    arm_ladder: list[str] | None = None,
+) -> tuple[list[dict], str | None, dict | None, str | None, bool]:
     """Review one file with up to 3 attempts and exponential backoff.
 
-    Returns (findings, None) on success or ([], last_error_message) after all retries.
-    Change 4: per-file retry with exponential backoff; caller marks file as skipped.
+    Returns (findings, error, usage, arm_used, escalated).
+    When arm_ladder is given, attempt N escalates to ladder[min(N, len-1)] —
+    a cheap model that fails its API call retried on a stronger tier.
     """
     from review import review_file
     last_err: str | None = None
     rel = gd.relative_to(project_path).as_posix()
+    arm_used: str | None = None
+    escalated = False
 
     for attempt in range(3):
+        p = provider
+        if arm_ladder and provider_for:
+            arm_used = arm_ladder[min(attempt, len(arm_ladder) - 1)]
+            p = provider_for(arm_used)
+            if attempt > 0 and arm_used != arm_ladder[0]:
+                escalated = True
         try:
-            file_findings, err = review_file(gd, project_path, index, provider,
+            file_findings, err = review_file(gd, project_path, index, p,
                                              memory_hints=memory_hints)
             if err:
                 last_err = err
@@ -579,7 +693,7 @@ def _review_one_file_with_retry(
                     )
                     time.sleep(wait)
                 continue
-            return file_findings, None
+            return file_findings, None, getattr(p, "last_usage", None), arm_used, escalated
         except Exception as exc:
             last_err = str(exc)
             if attempt < 2:
@@ -590,7 +704,7 @@ def _review_one_file_with_retry(
                 )
                 time.sleep(wait)
 
-    return [], last_err
+    return [], last_err, None, arm_used, escalated
 
 
 def _load_index_from_state(state: GameReport) -> dict:
@@ -628,27 +742,40 @@ def code_review_node(state: GameReport) -> dict:
     project_path = Path(state["project_path"])
     scope = set(state.get("scope", []))
 
-    from review import RealLLMProvider, discover_files as _discover_files
-    provider = RealLLMProvider()
+    from review import RealLLMProvider
+    provider = RealLLMProvider()  # default model — used for unrouted files
+
+    # ── Routing setup (empty plan = routing disabled/skipped upstream) ──────
+    routing_plan = state.get("routing_plan", {})
+    bandit = None
+    arm_table: dict[str, dict] = {}
+    provider_cache: dict[str, "RealLLMProvider"] = {}
+    run_pulls: dict[str, int] = {}
+    run_rewards: dict[str, float] = {}
+    escalations = 0
+    if routing_plan:
+        from agents.router import LinUCB, available_arms
+        arms = available_arms()
+        arm_table = {a["name"]: a for a in arms}
+        bandit = LinUCB.load(_ROUTER_DIR / "linucb.json", list(arm_table))
+
+        def _provider_for(arm_name: str):
+            if arm_name not in provider_cache:
+                a = arm_table[arm_name]
+                provider_cache[arm_name] = RealLLMProvider(
+                    model=a["model"], provider=a["provider"])
+            return provider_cache[arm_name]
+    else:
+        _provider_for = None
 
     try:
-        gd_files = _discover_files(project_path)
-        # The playtest node injects autoload/test_controller.gd in parallel —
-        # never review our own test harness.
-        gd_files = [f for f in gd_files if f.name != "test_controller.gd"]
+        gd_files = _discover_review_files(project_path, scope)
     except Exception as e:
         console.log(f"[red]  File discovery failed: {e}[/red]")
         return {
             "findings": [], "skipped_files": [], "code_review_errors": [],
             "agent_status": {"code_review": f"failed: {e}"},
         }
-
-    if scope:
-        gd_files = [
-            f for f in gd_files
-            if f.relative_to(project_path).as_posix() in scope
-            or str(f.relative_to(project_path)) in scope
-        ]
 
     all_findings: list[dict] = []
     skipped_files: list[str] = []
@@ -661,14 +788,31 @@ def code_review_node(state: GameReport) -> dict:
         rel = gd.relative_to(project_path).as_posix()
         mem_hints = memory.retrieve(rel, index)
         mem_retrieved += bool(mem_hints)
-        file_findings, err = _review_one_file_with_retry(
-            gd, project_path, index, provider, memory_hints=mem_hints or None
+
+        ladder = None
+        entry = routing_plan.get(rel)
+        if entry and bandit is not None:
+            from agents.router import escalation_ladder
+            ladder = escalation_ladder(list(arm_table.values()), entry["arm"])
+
+        file_findings, err, usage, arm_used, escalated = _review_one_file_with_retry(
+            gd, project_path, index, provider, memory_hints=mem_hints or None,
+            provider_for=_provider_for, arm_ladder=ladder,
         )
         if err is not None:
             console.log(f"[yellow]  Skipping {rel} after 3 failures: {err}[/yellow]")
             skipped_files.append(rel)
-        else:
-            all_findings.extend(file_findings)
+            continue
+
+        all_findings.extend(file_findings)
+        if entry and bandit is not None and arm_used:
+            from agents.router import compute_reward
+            reward = compute_reward(file_findings, usage, entry["rel_cost"])
+            bandit.update(arm_used, entry["context"], reward)
+            run_pulls[arm_used] = run_pulls.get(arm_used, 0) + 1
+            run_rewards[arm_used] = run_rewards.get(arm_used, 0.0) + reward
+            if escalated:
+                escalations += 1
 
     memory_stats = memory.curate(all_findings, run_id=state.get("timestamp", ""))
     if memory_stats["added"] or memory_stats["updated"]:
@@ -686,11 +830,30 @@ def code_review_node(state: GameReport) -> dict:
         + f" ({_elapsed(t0)})[/cyan]"
     )
     status = f"ok:{len(skipped_files)}_skipped" if skipped_files else "ok"
+
+    routing_stats: dict = {}
+    if bandit is not None:
+        bandit.save(_ROUTER_DIR / "linucb.json")
+        routing_stats = {
+            **state.get("routing_stats", {}),
+            "pulls": run_pulls,
+            "total_reward": {a: round(r, 3) for a, r in run_rewards.items()},
+            "mean_reward": {a: round(run_rewards[a] / run_pulls[a], 3)
+                            for a in run_pulls if run_pulls[a]},
+            "escalations": escalations,
+            "bandit_pulls_after": dict(bandit.pulls),
+        }
+        console.log(
+            f"[dim]  Router: {run_pulls} escalations={escalations} "
+            f"(bandit saved)[/dim]"
+        )
+
     return {
         "findings": all_findings,
         "skipped_files": skipped_files,
         "code_review_errors": [],
         "memory_stats": {**memory_stats, "files_with_hints": mem_retrieved},
+        "routing_stats": routing_stats,
         "agent_status": {"code_review": status},
     }
 
@@ -1238,7 +1401,7 @@ def build_graph(checkpointer=None, with_auto_fix: bool = False):
     """Compile the LangGraph pipeline.
 
     Node sequence:
-      preflight_check → build_index → resolve_scope →
+      preflight_check → build_index → resolve_scope → route_files →
       [pipeline_check ‖ code_review] →
       playtest → runtime_verifier →
       cross_correlator → filter_refuted → findings_dedup →
@@ -1260,6 +1423,7 @@ def build_graph(checkpointer=None, with_auto_fix: bool = False):
     graph.add_node("preflight_check",  preflight_check_node)
     graph.add_node("build_index",      build_index_node)
     graph.add_node("resolve_scope",    resolve_scope_node)
+    graph.add_node("route_files",      route_files_node)
     graph.add_node("pipeline_check",   pipeline_check_node,
                    retry_policy=RetryPolicy(
                        max_attempts=3, initial_interval=1.0,
@@ -1285,12 +1449,13 @@ def build_graph(checkpointer=None, with_auto_fix: bool = False):
         "continue": "build_index",
     })
 
-    # build_index → resolve_scope
+    # build_index → resolve_scope → route_files
     graph.add_edge("build_index", "resolve_scope")
+    graph.add_edge("resolve_scope", "route_files")
 
-    # resolve_scope → parallel fan-out
-    graph.add_edge("resolve_scope", "pipeline_check")
-    graph.add_edge("resolve_scope", "code_review")
+    # route_files → parallel fan-out
+    graph.add_edge("route_files", "pipeline_check")
+    graph.add_edge("route_files", "code_review")
 
     # parallel join → runtime layer → cross_correlator
     graph.add_edge("pipeline_check", "playtest")
@@ -1349,6 +1514,9 @@ def save_report(state: dict, output_dir: Path) -> None:
             "scripts_exercised": len(state.get("runtime_coverage", [])),
             "infra_error": state.get("playtest_infra_error", False),
         }
+    routing_stats = state.get("routing_stats") or {}
+    if routing_stats:
+        metadata["routing"] = routing_stats
     (output_dir / "run_metadata.json").write_text(
         json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8"
     )
@@ -1367,6 +1535,7 @@ def save_report(state: dict, output_dir: Path) -> None:
         ("fix_verify_results",    "fix_verify_results.json"),
         ("observed_signals",      "observed_signals.json"),
         ("runtime_coverage",      "runtime_coverage.json"),
+        ("routing_plan",          "routing_plan.json"),
     ]:
         (output_dir / filename).write_text(
             json.dumps(state.get(key, []), indent=2, ensure_ascii=False),
@@ -1453,6 +1622,8 @@ def main() -> None:
                         help="With --resume (or at the pause): approve auto-fix")
     parser.add_argument("--reject", action="store_true",
                         help="With --resume (or at the pause): reject auto-fix")
+    parser.add_argument("--no-router", action="store_true",
+                        help="Disable bandit model routing (A/B baseline: default model for all files)")
     args = parser.parse_args()
 
     if args.print_graph:
@@ -1500,7 +1671,8 @@ def main() -> None:
         ))
 
         result = app.invoke(
-            _default_state(args.project, args.no_display, str(output_dir)),
+            _default_state(args.project, args.no_display, str(output_dir),
+                           no_router=args.no_router),
             config,
         )
         result = _resolve_interrupts(app, config, result, args, output_dir)

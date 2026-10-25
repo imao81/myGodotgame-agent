@@ -43,6 +43,10 @@ enough to put it in front of a human.
                    │ END │       └──────┬──────┘
                    └─────┘              │
                                         ▼
+                               ┌────────────────┐
+                               │  route_files   │  LinUCB bandit:
+                               └───────┬────────┘  file → model tier
+                                       ▼
                            ┌────────────────────────┐
                            │  [pipeline_check  │    │
                            │   code_review]    │◄───┘ (parallel)
@@ -94,6 +98,7 @@ per-file loop) re-runs that node from its start.
 | `preflight_check` | Validate API keys, Godot binary, project.godot |
 | `build_index` | Scan project, build mtime-cached symbol index |
 | `resolve_scope` | Git diff detection + dependency expansion |
+| `route_files` | LinUCB bandit assigns each file a model tier (cheap↔premium) |
 | `pipeline_check` | Static analysis (import, syntax, resources) |
 | `code_review` | LLM-powered review with per-file retry |
 | `playtest` | Headless Godot playtest via injected test controller (LLM-free) |
@@ -295,6 +300,7 @@ reports/20250328_161030/
 ├── playtest_results.json    # Automated playtest scenarios
 ├── observed_signals.json    # Events bus signals observed during playtest
 ├── runtime_coverage.json    # Scripts loaded in the live scene tree
+├── routing_plan.json        # Per-file model tier assignments (bandit)
 ├── fix_verify_results.json  # Post-fix playtest comparison (only with --auto-fix)
 └── ...
 ```
@@ -410,6 +416,46 @@ One wrinkle worth knowing: scripts launched with `godot --script` cannot
 resolve autoload globals (`Events`) at compile time even though the singleton
 is in the tree at runtime — the controller connects through the node instead.
 
+### 9. Cost-Aware Model Routing (Contextual Bandit)
+
+Not every file deserves the same model. A 30-line UI script and a 600-line
+state machine are different jobs — so a `route_files` node assigns each
+in-scope file a model tier before review, using **disjoint LinUCB** (one
+linear bandit per arm, UCB selection over a 9-dim structural feature vector:
+size, methods, signals, preloads, async, inheritance depth…).
+
+The part that makes this work without a labelling budget: **the reward signal
+is free**. After each file's review, the verifier has already classified every
+finding as confirmed or refuted — so
+
+```text
+reward = n_confirmed − n_refuted − λ · (tokens / 1000) · relative_cost
+```
+
+is computed online, and the bandit persists across runs
+(`.kimi/router/linucb.json`). Clean files earn only the (negative) cost term,
+which pushes easy work toward cheaper tiers over time; files where findings
+hold up under verification reward the stronger models that found them.
+
+- **Arms** are resolved from available API keys: Kimi highspeed / standard /
+  K3 tiers, plus Claude Sonnet when `ANTHROPIC_API_KEY` is set. Single-key
+  setups degrade to "everything on the default model".
+- **Escalation**: if a cheap tier's API call fails, the per-file retry ladder
+  climbs to the next tier instead of retrying the same one.
+- **A/B**: `--no-router` pins all files to the default model as a baseline;
+  `ROUTER_ARMS` whitelists tiers; `ROUTER_LAMBDA` tunes cost sensitivity.
+- Learning compounds: each run's arm distribution, per-arm mean reward, and
+  escalation count land in `run_metadata.json` → `routing_plan.json`.
+
+Idea lineage: RouteLLM (arXiv 2406.18665) and *Learning to Route LLMs from
+Bandit Feedback* (arXiv 2510.07429) — here applied to code review, where the
+verifier replaces human preference labels.
+
+Known limitation: a file with zero findings can't distinguish "genuinely
+clean" from "model looked away" — the verifier only judges what was proposed.
+That's accepted in v1 and partly covered by the playtest layer catching
+runtime-visible breakage regardless of which model reviewed the file.
+
 ## Project Structure
 
 ```text
@@ -487,6 +533,9 @@ harvester-agent/
 
 # Resume from the last checkpoint (after a crash or a human-gate pause)
 --resume [--approve | --reject]
+
+# Disable bandit model routing (A/B baseline)
+--no-router
 ```
 
 ## Testing

@@ -92,14 +92,27 @@ def _other_provider(provider: str) -> str:
 
 
 class LLMClient:
-    """Provider-agnostic LLM wrapper for text and vision requests."""
+    """Provider-agnostic LLM wrapper for text and vision requests.
+
+    Args:
+        provider:        "claude" | "kimi" (default: env auto-detection)
+        model:           override the default text model — used by the router
+                         to pin a file's review to a specific model tier
+        enable_fallback: also try the other provider on failure
+
+    After each successful chat() call, `last_usage` holds token counts
+    ({"prompt_tokens": int, "completion_tokens": int}); None after a failure.
+    """
 
     def __init__(
         self,
         provider: Optional[str] = None,
+        model: Optional[str] = None,
         enable_fallback: bool = False,
     ):
         self.provider = (provider or _resolve_provider()).lower()
+        self._model = model
+        self.last_usage: Optional[dict] = None
         self.enable_fallback = (
             enable_fallback or os.environ.get("LLM_FALLBACK", "").strip() == "1"
         )
@@ -116,9 +129,14 @@ class LLMClient:
 
         client = anthropic.Anthropic()
         response = client.messages.create(
-            model=_CLAUDE_TEXT_MODEL,
+            model=self._model or _CLAUDE_TEXT_MODEL,
             max_tokens=max_tokens,
             messages=messages,
+        )
+        u = getattr(response, "usage", None)
+        self.last_usage = (
+            {"prompt_tokens": u.input_tokens, "completion_tokens": u.output_tokens}
+            if u else None
         )
         block = next(
             b for b in response.content if isinstance(b, anthropic.types.TextBlock)
@@ -180,9 +198,14 @@ class LLMClient:
 
     def _chat_kimi(self, messages: list[ChatCompletionMessageParam], max_tokens: int) -> str:
         response = self._get_kimi_client().chat.completions.create(
-            model=_KIMI_TEXT_MODEL,
+            model=self._model or _KIMI_TEXT_MODEL,
             max_tokens=max_tokens,
             messages=messages,
+        )
+        u = getattr(response, "usage", None)
+        self.last_usage = (
+            {"prompt_tokens": u.prompt_tokens, "completion_tokens": u.completion_tokens}
+            if u else None
         )
         return response.choices[0].message.content or ""
 
@@ -230,6 +253,7 @@ class LLMClient:
                 fallback = _other_provider(self.provider)
                 if fallback in dispatch:
                     return dispatch[fallback](messages, max_tokens)
+            self.last_usage = None
             raise
 
     def chat_vision(

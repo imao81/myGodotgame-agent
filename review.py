@@ -100,9 +100,14 @@ class LLMProvider(abc.ABC):
 class RealLLMProvider(LLMProvider):
     """Production adapter wrapping agents.llm_client.LLMClient."""
 
-    def __init__(self) -> None:
+    def __init__(self, model: str | None = None, provider: str | None = None) -> None:
         from agents.llm_client import LLMClient
-        self._client = LLMClient()
+        self._client = LLMClient(provider=provider, model=model)
+
+    @property
+    def last_usage(self) -> dict | None:
+        """Token usage of the most recent generate() call (None after failure)."""
+        return self._client.last_usage
 
     def generate(self, prompt: str) -> str:
         return self._client.chat(

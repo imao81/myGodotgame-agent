@@ -217,10 +217,18 @@ class LLMClient:
 
     def _chat_compat(self, provider: str, default_model: str,
                      messages: list[ChatCompletionMessageParam], max_tokens: int) -> str:
+        extra: dict = {}
+        # DeepSeek V4 enables thinking mode by default — the reasoning chain
+        # eats the entire token budget and content comes back EMPTY (observed:
+        # 8192/8192 completion tokens, zero content). Opt out per-request
+        # unless DEEPSEEK_THINKING=1.
+        if provider == "deepseek" and os.environ.get("DEEPSEEK_THINKING", "0") != "1":
+            extra["extra_body"] = {"thinking": {"type": "disabled"}}
         response = self._get_compat_client(provider).chat.completions.create(
             model=self._model or default_model,
             max_tokens=max_tokens,
             messages=messages,
+            **extra,
         )
         u = getattr(response, "usage", None)
         self.last_usage = (

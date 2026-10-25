@@ -98,11 +98,19 @@ class LLMProvider(abc.ABC):
 
 
 class RealLLMProvider(LLMProvider):
-    """Production adapter wrapping agents.llm_client.LLMClient."""
+    """Production adapter wrapping agents.llm_client.LLMClient.
 
-    def __init__(self, model: str | None = None, provider: str | None = None) -> None:
+    max_tokens defaults to the review budget (1536). Thinking-model tiers
+    (e.g. DeepSeek V4) spend tokens on reasoning before content, so callers
+    like the GEPA replay pass a larger budget — otherwise the response hits
+    the cap with empty content.
+    """
+
+    def __init__(self, model: str | None = None, provider: str | None = None,
+                 max_tokens: int = _MAX_TOKENS) -> None:
         from agents.llm_client import LLMClient
         self._client = LLMClient(provider=provider, model=model)
+        self._max_tokens = max_tokens
 
     @property
     def last_usage(self) -> dict | None:
@@ -112,7 +120,7 @@ class RealLLMProvider(LLMProvider):
     def generate(self, prompt: str) -> str:
         return self._client.chat(
             [{"role": "user", "content": prompt}],
-            max_tokens=_MAX_TOKENS,
+            max_tokens=self._max_tokens,
         ).strip()
 
 
@@ -315,6 +323,7 @@ def build_prompt(
     index: dict,
     anchor_findings: list[dict] | None = None,
     memory_hints: list[dict] | None = None,
+    template: str | None = None,
 ) -> str:
     """Build the formatted LLM review prompt for one file.
 
@@ -328,8 +337,12 @@ def build_prompt(
     memory_hints:
         Verified false-positive patterns from ReviewMemory (past runs).  Injected
         as their own block, orthogonal to anchor mode.
+    template:
+        Prompt template override (used by the GEPA fitness loop to evaluate
+        candidate prompts). None = the cached default review_prompt_v2.txt.
     """
-    template = _load_prompt_template()
+    if template is None:
+        template = _load_prompt_template()
     res_path = f"res://{rel_posix}"
 
     autoloads: dict = index.get("autoloads", {})
@@ -473,11 +486,13 @@ def review_file(
     provider: LLMProvider,
     anchor_findings: list[dict] | None = None,
     memory_hints: list[dict] | None = None,
+    template: str | None = None,
 ) -> tuple[list[dict], str | None]:
     """Review one file.  Returns (sanitized_findings, error_message_or_None).
 
     anchor_findings: None = anti-anchor mode (default); list = anchor hint mode.
     memory_hints: verified false-positive patterns from past runs (ReviewMemory).
+    template: prompt template override (GEPA fitness evaluation); None = default.
     """
     rel_posix = gd_path.relative_to(project_root).as_posix()
     try:
@@ -490,7 +505,7 @@ def review_file(
 
     try:
         prompt = build_prompt(rel_posix, code, index, anchor_findings=anchor_findings,
-                              memory_hints=memory_hints)
+                              memory_hints=memory_hints, template=template)
         raw = provider.generate(prompt)
     except Exception as e:
         return [], f"LLM call failed: {e}"

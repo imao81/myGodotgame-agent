@@ -43,7 +43,12 @@ _PARTIAL_WEIGHT = 0.5
 # ── Loader ─────────────────────────────────────────────────────────────────────
 
 def load_labelled(path: Path) -> list[dict]:
-    """Read JSONL, return only labelled (non-null human_label) records."""
+    """Read JSONL, return only records labelled tp/fp/partial.
+
+    Other non-null labels (e.g. "disputed") are excluded from BOTH precision
+    and FP-rate denominators — silently counting them as non-FP would bias
+    the FP rate downward.
+    """
     records: list[dict] = []
     skipped = 0
     with path.open(encoding="utf-8") as fh:
@@ -56,8 +61,12 @@ def load_labelled(path: Path) -> list[dict]:
             except json.JSONDecodeError as e:
                 print(f"  WARNING line {lineno}: invalid JSON — {e}")
                 continue
-            if rec.get("human_label") is None:
+            label = rec.get("human_label")
+            if label is None:
                 skipped += 1
+                continue
+            if label not in ("tp", "fp", "partial"):
+                print(f"  NOTE line {lineno}: label {label!r} excluded from metrics")
                 continue
             records.append(rec)
     if skipped:

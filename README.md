@@ -458,6 +458,38 @@ Idea lineage: RouteLLM (arXiv 2406.18665) and *Learning to Route LLMs from
 Bandit Feedback* (arXiv 2510.07429) — here applied to code review, where the
 verifier replaces human preference labels.
 
+### 10. Self-Improving Prompts (Offline Prompt Evolution)
+
+The review prompt is not hand-tuned folklore — it evolves against the
+human-labelled golden set (49 findings over 32 files, each with reviewer
+notes). `agents/gepa.py` implements GEPA-style reflective mutation
+(arXiv 2507.19457):
+
+1. **Fitness by replay**: a candidate prompt re-reviews the golden-covered
+   files; its findings are matched against human verdicts. Re-discovering a
+   confirmed bug earns recall credit; re-producing a human-rejected false
+   positive costs; novel output carries a small capped noise penalty (its
+   truth is unknowable — the golden set is a labelled finding list, not a
+   bug census, so fitness is precision-oriented by construction).
+2. **Reflective mutation**: the mutator model reads the current template
+   plus feedback naming the exact missed bugs and the humans' reasons for
+   rejecting the reproduced FPs, then rewrites the template. Candidates that
+   lose the `{filename}`/`{autoload_list}`/`{context_and_code}` placeholders
+   are discarded before spending a single evaluation call.
+3. **Cost discipline**: minibatch scoring on a cheap tier
+   (deepseek-v4-flash by default), full-set runoff only for finalists.
+
+```bash
+python -m agents.gepa --iterations 8 --minibatch 12   # ~25 min
+python -m agents.gepa --dry-run                        # validate setup, no LLM calls
+```
+
+The winner lands in `prompts/review_prompt_evolved.txt` (never overwrites the
+production prompt automatically); `eval/gepa_report.md` records every
+candidate's lineage and fitness. Simplification vs. the paper: with 32 files
+we use mean-fitness selection plus a full-set runoff rather than a true
+per-instance Pareto front.
+
 Known limitation: a file with zero findings can't distinguish "genuinely
 clean" from "model looked away" — the verifier only judges what was proposed.
 That's accepted in v1 and partly covered by the playtest layer catching

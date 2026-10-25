@@ -74,6 +74,8 @@ def run_test_controller(project_path: str, test_script: str, timeout: int = 60) 
     ], timeout=timeout)
 
     json_results = []
+    coverage: list[str] = []
+    signals: dict[str, int] = {}
     for line in result["output"].splitlines():
         line = line.strip()
         if line.startswith("TEST_RESULT:"):
@@ -81,8 +83,23 @@ def run_test_controller(project_path: str, test_script: str, timeout: int = 60) 
                 json_results.append(json.loads(line[len("TEST_RESULT:"):]))
             except json.JSONDecodeError:
                 pass
+        elif line.startswith("COVERAGE:"):
+            try:
+                parsed = json.loads(line[len("COVERAGE:"):])
+                if isinstance(parsed, list):
+                    coverage = [str(p) for p in parsed]
+            except json.JSONDecodeError:
+                pass
+        elif line.startswith("SIGNALS:"):
+            try:
+                parsed = json.loads(line[len("SIGNALS:"):])
+                if isinstance(parsed, dict):
+                    signals = {str(k): int(v) for k, v in parsed.items()}
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
 
-    return {**result, "json_results": json_results}
+    return {**result, "json_results": json_results,
+            "coverage": coverage, "signals": signals}
 
 
 def _run(cmd: list[str], timeout: int = 60) -> dict:

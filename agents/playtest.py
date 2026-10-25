@@ -32,15 +32,21 @@ def run(state: dict) -> dict:
     screenshots: list[str] = []
     focus_files: list[str] = []
     balance_issues: list[str] = []
+    observed_signals: dict[str, int] = {}
+    runtime_coverage: list[str] = []
+    infra_error = False
 
     # If pipeline check failed hard, skip playtest to avoid misleading results
     if not pipeline_ok:
         return {
-            "playtest_results": [{"scenario": "all", "passed": False,
+            "playtest_results": [{"scenario": "all", "passed": False, "infra": True,
                                    "error": "Skipped: pipeline check failed"}],
             "screenshots": [],
             "focus_files": [],
             "balance_issues": [],
+            "observed_signals": {},
+            "runtime_coverage": [],
+            "playtest_infra_error": True,
             "agent_status": {"playtest": "skipped"},
         }
 
@@ -66,16 +72,24 @@ def run(state: dict) -> dict:
                 if r.get("balance_issue"):
                     balance_issues.append(r["balance_issue"])
 
-        # If Godot crashed with no results, record that
+        observed_signals = godot_result.get("signals", {})
+        runtime_coverage = godot_result.get("coverage", [])
+
+        # If Godot crashed with no results, record that — this is an
+        # infrastructure failure, not a gameplay verdict.
         if not godot_result["json_results"] and not godot_result["success"]:
+            infra_error = True
             results.append({
                 "scenario": "startup",
                 "passed": False,
+                "infra": True,
                 "error": godot_result["output"][-500:],  # last 500 chars
             })
 
-        # ── Layer 2: visual tests (skipped in no-display mode) ─────────────
-        if not no_display:
+        # ── Layer 2: visual tests (skipped in no-display/static-only mode) ──
+        # Layer 1 is LLM-free and must still run in static_only mode; vision
+        # analysis needs both a display and a working LLM provider.
+        if not no_display and state.get("fallback_mode") != "static_only":
             screenshot_dir = Path(project_path) / "test_output"
             screenshot_dir.mkdir(exist_ok=True)
 
@@ -84,20 +98,24 @@ def run(state: dict) -> dict:
             # saves screenshots even in headless mode for key state transitions)
             pngs = sorted(screenshot_dir.glob("*.png"))
             if pngs:
-                client = LLMClient()
-                visual_specs = [
-                    {"path": str(p), "expected": _expected_state_for(p.name)}
-                    for p in pngs
-                ]
-                vision_results = analyze_all(client, visual_specs)
-                for vr in vision_results:
-                    screenshots.append(vr["path"])
-                    if not vr.get("ok", True):
-                        results.append({
-                            "scenario": f"visual:{Path(vr['path']).name}",
-                            "passed": False,
-                            "error": "; ".join(vr.get("issues", [])),
-                        })
+                try:
+                    client = LLMClient()
+                    visual_specs = [
+                        {"path": str(p), "expected": _expected_state_for(p.name)}
+                        for p in pngs
+                    ]
+                    vision_results = analyze_all(client, visual_specs)
+                    for vr in vision_results:
+                        screenshots.append(vr["path"])
+                        if not vr.get("ok", True):
+                            results.append({
+                                "scenario": f"visual:{Path(vr['path']).name}",
+                                "passed": False,
+                                "error": "; ".join(vr.get("issues", [])),
+                            })
+                except Exception:
+                    # Vision is best-effort — never sacrifice Layer 1 results.
+                    pass
 
     finally:
         # ── Always remove injected file ────────────────────────────────────
@@ -106,13 +124,19 @@ def run(state: dict) -> dict:
 
     passed = sum(1 for r in results if r.get("passed", False))
     failed = sum(1 for r in results if not r.get("passed", True))
-    status = "ok" if failed == 0 else "ok_with_failures"
+    if infra_error:
+        status = "playtest_infra_error"
+    else:
+        status = "ok" if failed == 0 else "ok_with_failures"
 
     return {
         "playtest_results": results,
         "screenshots": screenshots,
         "focus_files": list(set(focus_files)),
         "balance_issues": balance_issues,
+        "observed_signals": observed_signals,
+        "runtime_coverage": runtime_coverage,
+        "playtest_infra_error": infra_error,
         "agent_status": {"playtest": status},
         "playtest_summary": f"{passed} passed, {failed} failed out of {len(results)} scenarios",
     }

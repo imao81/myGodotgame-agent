@@ -77,13 +77,29 @@ Use exactly one assertion per finding.  Choose the type that best matches:
    Use when: a preload/load/reference points to a file that does not exist.
    Fields:  path (str, res:// path)
 
-7. unverifiable
-   Use when: your finding is valid but does NOT match any of types 1–6.
+7. runtime_signal_not_emitted
+   Use when: the code claims to emit an Events bus signal, but you believe the
+             emission path can never execute (dead branch, always-false guard,
+             return before the emit). Only for signals on the Events autoload.
+   Fields:  signal_name (str, an Events bus signal),
+            trigger (str, the gameplay action that should cause the emission),
+            expected_context (list[str], optional — Events signals that must
+            fire before this one can, e.g. ["mine_started"] for "mine_finished")
+   NOTE: static verification always returns "unverifiable" for this type, so an
+   error-severity finding becomes a dormant bug. A runtime playtest layer then
+   re-judges it: if the signal is observed firing, the claim is refuted; if the
+   trigger context was exercised but the signal never fired, it is confirmed
+   as a real bug. Only use this type when you have strong structural evidence
+   the emission is unreachable.
+
+8. unverifiable
+   Use when: your finding is valid but does NOT match any of types 1–7.
    Fields:  (none required beyond "type")
    IMPORTANT: "unverifiable" findings MUST use severity "warning" or "info", NEVER "error".
-   Only verifiable assertions (types 1–6) can support severity "error".
+   Only verifiable assertions (types 1–6) can support severity "error";
+   type 7 may use "error" but will be held as dormant until the runtime check.
 
-RULE: If your finding does not fit types 1–6, you MUST use type "unverifiable".
+RULE: If your finding does not fit types 1–7, you MUST use type "unverifiable".
 NEVER use a real assertion type with fake/placeholder parameters (e.g. signal_name:
 "__no_signal__"). That breaks the verification pipeline and will be auto-rejected.
 

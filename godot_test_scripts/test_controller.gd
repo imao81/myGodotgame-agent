@@ -26,6 +26,19 @@ var _player_died := false
 var _upgrade_unlocked := false
 var _damage_events := 0
 
+# Full observation table for the runtime verifier — every watched signal,
+# initialised to 0 so "never fired" is distinguishable from "not watched".
+var _signal_counts := {
+    "station_spawned": 0,
+    "asteroid_spawned": 0,
+    "pirate_spawned": 0,
+    "player_died": 0,
+    "mine_started": 0,
+    "mine_finished": 0,
+    "upgrade_unlocked": 0,
+    "damaged": 0,
+}
+
 var _elapsed := 0.0
 var _phase   := "init"
 
@@ -35,15 +48,24 @@ func _initialize() -> void:
 		quit()
 		return
 
-	# Hook Events signals before loading the scene (autoloads are already up)
-	Events.station_spawned.connect(_on_station_spawned)
-	Events.asteroid_spawned.connect(_on_asteroid_spawned)
-	Events.pirate_spawned.connect(_on_pirate_spawned)
-	Events.player_died.connect(_on_player_died)
-	Events.mine_started.connect(_on_mine_started)
-	Events.mine_finished.connect(_on_mine_finished)
-	Events.upgrade_unlocked.connect(_on_upgrade_unlocked)
-	Events.damaged.connect(_on_damaged)
+	# Hook Events signals before loading the scene. NOTE: scripts run via
+	# --script cannot resolve autoload globals at compile time ("Identifier
+	# not found: Events"), although the singleton IS in the tree at runtime —
+	# so connect through the node, not the global identifier.
+	var events: Node = get_root().get_node_or_null("Events")
+	if events == null:
+		_emit_result("events_autoload_available", false,
+			"Events autoload not found in the scene tree")
+		_finish()
+		return
+	events.connect("station_spawned", _on_station_spawned)
+	events.connect("asteroid_spawned", _on_asteroid_spawned)
+	events.connect("pirate_spawned", _on_pirate_spawned)
+	events.connect("player_died", _on_player_died)
+	events.connect("mine_started", _on_mine_started)
+	events.connect("mine_finished", _on_mine_finished)
+	events.connect("upgrade_unlocked", _on_upgrade_unlocked)
+	events.connect("damaged", _on_damaged)
 
 	# Load the game scene directly (skip main menu)
 	var packed = load(GAME_SCENE_PATH)
@@ -72,29 +94,41 @@ func _process(delta: float) -> bool:
 
 # ── Signal handlers ─────────────────────────────────────────────────────────
 
+func _count(signal_name: String) -> void:
+	_signal_counts[signal_name] = _signal_counts.get(signal_name, 0) + 1
+
+
 func _on_station_spawned(station: Node, player: Node) -> void:
+	_count("station_spawned")
 	_station = station
 	_player  = player
 
 func _on_asteroid_spawned(_object: Node) -> void:
+	_count("asteroid_spawned")
 	_asteroids.append(_object)
 
 func _on_pirate_spawned(pirate: Node) -> void:
+	_count("pirate_spawned")
 	_pirates.append(pirate)
 
 func _on_player_died() -> void:
+	_count("player_died")
 	_player_died = true
 
 func _on_mine_started(_pos: Variant) -> void:
+	_count("mine_started")
 	_mine_started = true
 
 func _on_mine_finished() -> void:
+	_count("mine_finished")
 	_mine_finished = true
 
 func _on_upgrade_unlocked() -> void:
+	_count("upgrade_unlocked")
 	_upgrade_unlocked = true
 
 func _on_damaged(_target: Variant, _damage: Variant, _shooter: Variant) -> void:
+	_count("damaged")
 	_damage_events += 1
 
 
@@ -205,7 +239,28 @@ func _emit_result(
 	print("TEST_RESULT:" + JSON.stringify(result))
 
 
+# ── Coverage collection ──────────────────────────────────────────────────────
+
+func _collect_coverage() -> Array:
+	# Walk the live scene tree and collect every script resource actually in
+	# use. The injected controller itself is excluded.
+	var seen := {}
+	_walk_scripts(get_root(), seen)
+	return seen.keys()
+
+
+func _walk_scripts(node: Node, seen: Dictionary) -> void:
+	var s = node.get_script()
+	if s != null and s.resource_path != "" \
+			and not s.resource_path.ends_with("test_controller.gd"):
+		seen[s.resource_path] = true
+	for child in node.get_children():
+		_walk_scripts(child, seen)
+
+
 func _finish() -> void:
 	# Short wait so remaining signals flush
 	await create_timer(0.2).timeout
+	print("SIGNALS:" + JSON.stringify(_signal_counts))
+	print("COVERAGE:" + JSON.stringify(_collect_coverage()))
 	quit()

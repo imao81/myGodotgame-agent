@@ -49,6 +49,14 @@ enough to put it in front of a human.
                            └──────────┬───────────┘
                                       ▼
                            ┌────────────────────────┐
+                           │        playtest        │  headless Godot boots the
+                           └──────────┬─────────────┘  game, watches the bus
+                                      ▼
+                           ┌────────────────────────┐
+                           │    runtime_verifier    │  dormant claims re-judged
+                           └──────────┬─────────────┘  against observed signals
+                                      ▼
+                           ┌────────────────────────┐
                            │    cross_correlator    │
                            └──────────┬─────────────┘
                                       ▼
@@ -68,9 +76,9 @@ enough to put it in front of a human.
                         │  human_gate (interrupt) │  ◄── only with --auto-fix:
                         └──────────┬──────────────┘      pauses for human approval
                                    ▼
-                            ┌────────────┐     ┌─────┐
-                            │  auto_fix  │────▶│ END │
-                            └────────────┘     └─────┘
+                        ┌────────────┐   ┌────────────┐   ┌─────┐
+                        │  auto_fix  │──▶│ fix_verify │──▶│ END │
+                        └────────────┘   └────────────┘   └─────┘
 ```
 
 Every node boundary is persisted to a SQLite checkpointer
@@ -88,12 +96,15 @@ per-file loop) re-runs that node from its start.
 | `resolve_scope` | Git diff detection + dependency expansion |
 | `pipeline_check` | Static analysis (import, syntax, resources) |
 | `code_review` | LLM-powered review with per-file retry |
+| `playtest` | Headless Godot playtest via injected test controller (LLM-free) |
+| `runtime_verifier` | Re-judge dormant runtime claims against observed signals |
 | `cross_correlator` | Correlate findings, detect index_gap patterns |
 | `filter_refuted` | Remove refuted (final_severity="drop") findings |
 | `findings_dedup` | Cascading deduplication |
 | `report_merger` | Generate final markdown + JSON reports |
 | `human_gate` | `--auto-fix` only: interrupt the graph and wait for a human to approve or reject the fix plan |
 | `auto_fix` | `--auto-fix` only: apply LLM fixes for error findings (git stash + `godot --check-only` protected) |
+| `fix_verify` | `--auto-fix` only: re-run the playtest after fixing — a fix that breaks a previously passing scenario is flagged as a regression |
 
 ## Quick Start — Full Command Chain
 
@@ -281,6 +292,10 @@ reports/20250328_161030/
 ├── deduplicated_findings.json
 ├── agent_status.json        # Per-node execution status
 ├── fix_results.json         # Auto-fix outcomes (only with --auto-fix)
+├── playtest_results.json    # Automated playtest scenarios
+├── observed_signals.json    # Events bus signals observed during playtest
+├── runtime_coverage.json    # Scripts loaded in the live scene tree
+├── fix_verify_results.json  # Post-fix playtest comparison (only with --auto-fix)
 └── ...
 ```
 
@@ -361,6 +376,39 @@ with a hard correctness gate DC lacks: only verifier-backed outcomes are stored.
 
 The effect compounds: repeated false positives are progressively suppressed,
 so precision improves with every run instead of resetting each time.
+
+### 8. Runtime Verification (Playtest Ground Truth)
+
+Static analysis has a blind spot: claims like "this signal emission can never
+execute" can't be settled by reading code. Those used to pile up as *dormant
+bugs* — plausible, but unproven. The pipeline now closes that gap by actually
+running the game.
+
+- **Playtest node**: injects a SceneTree test controller into the project,
+  boots the game headless, and watches the `Events` bus. Every watched signal
+  is counted; the live scene tree is walked to see which scripts were really
+  loaded. LLM-free, so it also runs in static-only mode.
+- **Runtime verifier**: findings carrying the `runtime_signal_not_emitted`
+  assertion are re-judged against what the playtest observed:
+  - signal fired → the claim is **refuted** (evidence attached)
+  - trigger context exercised but signal silent → dormant **upgraded to
+    confirmed error**
+  - scenario never exercised → left untouched, honestly
+- **Context gating is the point**: a missing signal is not proof of a bug —
+  maybe the playtest never triggered it. Only when every prerequisite signal
+  fired while the target stayed silent does absence become evidence. (Real
+  data from the demo game: `mine_finished` fired 191× while `mine_started`
+  never fired once — an anomaly worth a human look that pure static analysis
+  would never surface.)
+- **Coverage notes**: in-scope scripts the playtest never loaded show up as
+  info-level notes ("not exercised by playtest"), not dead-code verdicts.
+- **Fix-verify loop**: with `--auto-fix`, approved fixes are followed by a
+  playtest re-run; a fix that breaks a previously passing scenario is flagged
+  as a regression in the report.
+
+One wrinkle worth knowing: scripts launched with `godot --script` cannot
+resolve autoload globals (`Events`) at compile time even though the singleton
+is in the tree at runtime — the controller connects through the node instead.
 
 ## Project Structure
 

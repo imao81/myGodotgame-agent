@@ -28,6 +28,8 @@ Supported assertion types
 
 Stub (always returns unverifiable):
     unverifiable            — the LLM's explicit opt-out type
+    runtime_signal_not_emitted — runtime claim, re-judged by agents/runtime_verifier
+                                 after the automated playtest
 """
 
 from __future__ import annotations
@@ -62,6 +64,18 @@ def _confirmed(details: str, confidence: float = 0.9, fix: str | None = None) ->
 
 def _refuted(details: str, confidence: float = 0.95, fix: str | None = None) -> dict:
     return _result("refuted", confidence, details, fix)
+
+
+def _stub(assertion_type: str) -> dict:
+    reasons = {
+        "unverifiable": "the LLM explicitly marked this finding as not "
+                        "statically verifiable",
+        "runtime_signal_not_emitted": "runtime claim — statically unverifiable "
+                                      "by design; re-judged by the runtime "
+                                      "verifier after the playtest",
+    }
+    return _unverifiable(reasons.get(assertion_type,
+                                     f"stub assertion type '{assertion_type}'"))
 
 
 # ── Index lookup helpers ───────────────────────────────────────────────────────
@@ -526,7 +540,7 @@ _HANDLERS = {
     "file_not_exists": _verify_file_not_exists,
 }
 
-_STUBS = {"unverifiable"}
+_STUBS = {"unverifiable", "runtime_signal_not_emitted"}
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────

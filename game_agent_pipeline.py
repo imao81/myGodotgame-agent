@@ -12,6 +12,10 @@ Graph topology:
   pipeline_check           code_review   [parallel]
     └────────────────────────────┘
               ↓ join
+          playtest                     [headless Godot: runtime ground truth]
+              ↓
+        runtime_verifier               [dormant runtime claims re-judged]
+              ↓
         cross_correlator
               ↓
         filter_refuted
@@ -22,7 +26,7 @@ Graph topology:
               ↓                          [--auto-fix only]
         human_gate (interrupt ── human approval checkpoint)
               ↓ approved
-        auto_fix ──► END
+        auto_fix ──► fix_verify ──► END  [re-run playtest to catch regressions]
 
 Production features:
   - SqliteSaver checkpointer (.kimi/checkpoints/pipeline.sqlite) — every node
@@ -120,6 +124,17 @@ class GameReport(TypedDict):
     # Pipeline check (separate — static, no LLM enrichment)
     pipeline_issues: list[dict]
 
+    # Playtest (runtime verification layer — headless Godot, LLM-free)
+    playtest_results: list[dict]          # TEST_RESULT scenarios from test_controller.gd
+    playtest_summary: str
+    screenshots: list[str]
+    focus_files: list[str]                # files involved in failed scenarios
+    balance_issues: list[str]
+    observed_signals: dict                # Events bus signals actually fired: name → count
+    runtime_coverage: list[str]           # res:// scripts present in the live scene tree
+    playtest_infra_error: bool            # True = playtest couldn't run (not a verdict)
+    fix_verify_results: list[dict]        # playtest re-run after auto_fix (--auto-fix)
+
     # Post-correlation & dedup
     correlated_findings: list[dict]       # from cross_correlator
     deduplicated_findings: list[dict]     # from findings_dedup
@@ -155,6 +170,15 @@ def _default_state(project_path: str, no_display: bool, output_dir: str = "") ->
         code_review_errors=[],
         memory_stats={},
         pipeline_issues=[],
+        playtest_results=[],
+        playtest_summary="",
+        screenshots=[],
+        focus_files=[],
+        balance_issues=[],
+        observed_signals={},
+        runtime_coverage=[],
+        playtest_infra_error=False,
+        fix_verify_results=[],
         correlated_findings=[],
         deduplicated_findings=[],
         agent_status={},
@@ -495,6 +519,8 @@ def _code_review_static_fallback(state: GameReport) -> dict:
     for gd in sorted(root.rglob("*.gd")):
         if "libraries" in gd.parts:
             continue
+        if gd.name == "test_controller.gd":
+            continue  # playtest-injected harness, not game code
         rel = str(gd.relative_to(root))
         if scope and rel not in scope:
             continue
@@ -607,6 +633,9 @@ def code_review_node(state: GameReport) -> dict:
 
     try:
         gd_files = _discover_files(project_path)
+        # The playtest node injects autoload/test_controller.gd in parallel —
+        # never review our own test harness.
+        gd_files = [f for f in gd_files if f.name != "test_controller.gd"]
     except Exception as e:
         console.log(f"[red]  File discovery failed: {e}[/red]")
         return {
@@ -663,6 +692,86 @@ def code_review_node(state: GameReport) -> dict:
         "code_review_errors": [],
         "memory_stats": {**memory_stats, "files_with_hints": mem_retrieved},
         "agent_status": {"code_review": status},
+    }
+
+
+# ── Node: playtest ────────────────────────────────────────────────────────────
+
+def playtest_node(state: GameReport) -> dict:
+    """Run the automated playtest (headless Godot + injected test controller).
+
+    LLM-free (Layer 1), so it also runs in static_only mode. Infrastructure
+    failures never raise: a playtest that couldn't run is "skipped", and the
+    runtime_verifier treats missing observations as "no evidence", not "bug".
+    """
+    t0 = time.perf_counter()
+    console.log("[bold cyan]▶ Playtest[/bold cyan]")
+
+    try:
+        from agents.playtest import run as playtest_run
+        result = playtest_run(state)
+    except Exception as e:
+        console.log(f"[yellow]  Playtest could not run: {e}[/yellow]")
+        return {
+            "playtest_results": [], "playtest_summary": f"skipped: {e}",
+            "screenshots": [], "focus_files": [], "balance_issues": [],
+            "observed_signals": {}, "runtime_coverage": [],
+            "playtest_infra_error": True,
+            "agent_status": {"playtest": f"skipped: {e}"},
+        }
+
+    n_signals = sum(result.get("observed_signals", {}).values())
+    console.log(
+        f"[cyan]  {result.get('playtest_summary', '')} — "
+        f"{n_signals} signal observation(s), "
+        f"{len(result.get('runtime_coverage', []))} script(s) exercised "
+        f"({_elapsed(t0)})[/cyan]"
+    )
+    return result
+
+
+# ── Node: runtime_verifier ────────────────────────────────────────────────────
+
+def runtime_verifier_node(state: GameReport) -> dict:
+    """Re-judge dormant runtime assertions against playtest ground truth.
+
+    runtime_signal_not_emitted claims stay unverifiable statically; here they
+    are refuted (signal fired) or confirmed dormant→error (context exercised,
+    signal silent). Findings without runtime evidence pass through untouched.
+    """
+    t0 = time.perf_counter()
+    console.log("[bold cyan]▶ Runtime Verifier[/bold cyan]")
+
+    findings = state.get("findings", [])
+    observed = state.get("observed_signals", {})
+    playtest_ok = bool(observed) and not state.get("playtest_infra_error", False)
+
+    from agents.runtime_verifier import verify_runtime, coverage_notes
+    updated, stats = verify_runtime(findings, observed, playtest_ok)
+
+    # Coverage notes: in-scope scripts the playtest never loaded
+    scope = state.get("scope", [])
+    if not scope:
+        index = _load_index_from_state(state)
+        scope = [p[len("res://"):] for p in index.get("scripts", {})
+                 if p.startswith("res://")]
+    notes = coverage_notes(scope, state.get("runtime_coverage", [])) if observed else []
+
+    console.log(
+        f"[cyan]  {stats['runtime_confirmed']} upgraded dormant→error, "
+        f"{stats['runtime_refuted']} refuted by runtime evidence, "
+        f"{stats['runtime_unchecked']} unchecked; "
+        f"{len(notes)} coverage note(s) ({_elapsed(t0)})[/cyan]"
+    )
+    return {
+        "findings": updated,
+        "meta_findings": state.get("meta_findings", []) + notes,
+        "agent_status": {
+            "runtime_verifier": (
+                f"ok:+{stats['runtime_confirmed']}/-{stats['runtime_refuted']}"
+                if playtest_ok else "skipped:no_runtime_evidence"
+            ),
+        },
     }
 
 
@@ -753,7 +862,8 @@ def cross_correlator_node(state: GameReport) -> dict:
     )
     return {
         "correlated_findings": correlated,
-        "meta_findings": meta_findings,
+        # runtime_verifier may already have contributed coverage notes upstream
+        "meta_findings": state.get("meta_findings", []) + meta_findings,
         "agent_status": {"cross_correlator": "ok"},
     }
 
@@ -882,6 +992,27 @@ def _build_report_lines(state: GameReport, overall_health: str) -> list[str]:
         f"{len(pipeline_issues)} issue(s)",
         *[f"- [{i.get('type','')}] {i.get('path','')} — {i.get('message','')}"
           for i in pipeline_issues],
+    ]
+
+    playtest_results = state.get("playtest_results", [])
+    if playtest_results or state.get("playtest_summary"):
+        observed = state.get("observed_signals", {})
+        lines += [
+            "", "## Automated Playtest",
+            state.get("playtest_summary", ""),
+            *[f"- [{'PASS' if r.get('passed') else 'FAIL'}] {r.get('scenario','')}"
+              + (f" — {r.get('error') or r.get('message','')}"
+                 if not r.get('passed', True) else "")
+              for r in playtest_results],
+        ]
+        if observed:
+            fired = {k: v for k, v in observed.items() if v > 0}
+            lines.append(
+                f"Signals observed: {len(fired)}/{len(observed)} fired; "
+                f"{len(state.get('runtime_coverage', []))} script(s) exercised"
+            )
+
+    lines += [
         "", "## Code Review (Deduplicated)",
         (f"{len(deduplicated)} finding(s) — "
          f"{len(errors)} error(s), {len(dormant)} dormant, {len(warnings)} warning(s)"),
@@ -925,8 +1056,17 @@ def report_merger_node(state: GameReport) -> dict:
     deduplicated    = state.get("deduplicated_findings", [])
     correlated      = state.get("correlated_findings", [])
 
+    # Failed playtest scenarios are runtime-observed failures — strong enough
+    # evidence to gate red. Infra failures (r["infra"]) mean "couldn't run",
+    # not "game broken", and never affect health.
+    playtest_failures = [
+        r for r in state.get("playtest_results", [])
+        if not r.get("passed", True) and not r.get("infra")
+    ]
+
     has_hard_errors = (
         pipeline_issues or
+        playtest_failures or
         any(i.get("final_severity") in ("critical", "error") for i in deduplicated + correlated)
     )
     has_warnings = any(i.get("final_severity") == "warning" for i in deduplicated)
@@ -1015,6 +1155,83 @@ def auto_fix_node(state: GameReport) -> dict:
     }
 
 
+# ── Node: fix_verify (--auto-fix only) ────────────────────────────────────────
+
+def fix_verify_node(state: GameReport) -> dict:
+    """Re-run the playtest after auto_fix and compare against the pre-fix baseline.
+
+    The fix-verify loop closes the cycle: a fix that breaks the game is worse
+    than no fix. Regression = fewer passing scenarios than the baseline → an
+    error-level fix_verify result is appended to the report.
+    """
+    console.log("[bold cyan]▶ Fix Verify (re-running playtest)[/bold cyan]")
+
+    if not state.get("auto_fix_approved") or not state.get("fix_results"):
+        return {
+            "fix_verify_results": [],
+            "agent_status": {"fix_verify": "skipped:no_fix_applied"},
+        }
+
+    baseline_passed = {r.get("scenario") for r in state.get("playtest_results", [])
+                       if r.get("passed") and not r.get("infra")}
+
+    try:
+        from agents.playtest import run as playtest_run
+        rerun = playtest_run(state)
+    except Exception as e:
+        return {
+            "fix_verify_results": [{
+                "scenario": "fix_verify", "passed": False,
+                "message": f"playtest re-run failed after fix: {e}",
+            }],
+            "agent_status": {"fix_verify": "infra_error"},
+        }
+
+    if rerun.get("playtest_infra_error"):
+        return {
+            "fix_verify_results": [{
+                "scenario": "fix_verify", "passed": False,
+                "message": "playtest infrastructure failed after fix — cannot verify",
+            }],
+            "agent_status": {"fix_verify": "infra_error"},
+        }
+
+    after_passed = {r.get("scenario") for r in rerun.get("playtest_results", [])
+                    if r.get("passed") and not r.get("infra")}
+    regressions = sorted(baseline_passed - after_passed)
+
+    results: list[dict] = []
+    if regressions:
+        results.append({
+            "scenario": "fix_verify", "passed": False,
+            "message": f"fix introduced regression(s): {', '.join(regressions)} "
+                       f"passed before but fail now",
+        })
+        status = "regression"
+        console.log(f"[red]  Regression: {', '.join(regressions)}[/red]")
+    else:
+        results.append({
+            "scenario": "fix_verify", "passed": True,
+            "message": f"no regression — {len(after_passed)} scenario(s) pass "
+                       f"(baseline {len(baseline_passed)})",
+        })
+        status = "ok"
+        console.log("[green]  No regression after fix ✓[/green]")
+
+    summary_add = (
+        "\n\n## Fix Verify (playtest re-run after auto-fix)\n"
+        + "\n".join(
+            f"- [{'PASS' if r['passed'] else 'FAIL'}] {r['scenario']}: {r['message']}"
+            for r in results
+        )
+    )
+    return {
+        "fix_verify_results": results,
+        "summary": state.get("summary", "") + summary_add,
+        "agent_status": {"fix_verify": status},
+    }
+
+
 # ── Build LangGraph ────────────────────────────────────────────────────────────
 
 def build_graph(checkpointer=None, with_auto_fix: bool = False):
@@ -1023,14 +1240,16 @@ def build_graph(checkpointer=None, with_auto_fix: bool = False):
     Node sequence:
       preflight_check → build_index → resolve_scope →
       [pipeline_check ‖ code_review] →
+      playtest → runtime_verifier →
       cross_correlator → filter_refuted → findings_dedup →
-      report_merger → [human_gate → auto_fix]  (--auto-fix only)
+      report_merger → [human_gate → auto_fix → fix_verify]  (--auto-fix only)
 
     Args:
         checkpointer:  e.g. SqliteSaver — persists state at every node boundary
                        so a crashed/interrupted run can resume (requires one for
                        the human_gate interrupt).
-        with_auto_fix: append the human_gate → auto_fix tail after report_merger.
+        with_auto_fix: append the human_gate → auto_fix → fix_verify tail after
+                       report_merger.
 
     Visualise with:
         app = build_graph()
@@ -1050,6 +1269,8 @@ def build_graph(checkpointer=None, with_auto_fix: bool = False):
                        retry_on=_TRANSIENT_ERRORS,
                    ))
     graph.add_node("code_review",      code_review_node)
+    graph.add_node("playtest",         playtest_node)
+    graph.add_node("runtime_verifier", runtime_verifier_node)
     graph.add_node("cross_correlator", cross_correlator_node)
     graph.add_node("filter_refuted",   filter_refuted_node)
     graph.add_node("findings_dedup",   findings_dedup_node)
@@ -1071,9 +1292,11 @@ def build_graph(checkpointer=None, with_auto_fix: bool = False):
     graph.add_edge("resolve_scope", "pipeline_check")
     graph.add_edge("resolve_scope", "code_review")
 
-    # parallel join → cross_correlator
-    graph.add_edge("pipeline_check", "cross_correlator")
-    graph.add_edge("code_review",    "cross_correlator")
+    # parallel join → runtime layer → cross_correlator
+    graph.add_edge("pipeline_check", "playtest")
+    graph.add_edge("code_review",    "playtest")
+    graph.add_edge("playtest",         "runtime_verifier")
+    graph.add_edge("runtime_verifier", "cross_correlator")
 
     # cross_correlator → filter_refuted → findings_dedup → report_merger
     graph.add_edge("cross_correlator", "filter_refuted")
@@ -1083,9 +1306,11 @@ def build_graph(checkpointer=None, with_auto_fix: bool = False):
     if with_auto_fix:
         graph.add_node("human_gate", human_gate_node)
         graph.add_node("auto_fix",   auto_fix_node)
+        graph.add_node("fix_verify", fix_verify_node)
         graph.add_edge("report_merger", "human_gate")
         graph.add_edge("human_gate",    "auto_fix")
-        graph.add_edge("auto_fix",      END)
+        graph.add_edge("auto_fix",      "fix_verify")
+        graph.add_edge("fix_verify",    END)
     else:
         graph.add_edge("report_merger", END)
 
@@ -1117,6 +1342,13 @@ def save_report(state: dict, output_dir: Path) -> None:
             "approved": state.get("auto_fix_approved", False),
             "summary": state["fix_summary"],
         }
+    if state.get("playtest_summary"):
+        metadata["playtest"] = {
+            "summary": state["playtest_summary"],
+            "signals_observed": sum(state.get("observed_signals", {}).values()),
+            "scripts_exercised": len(state.get("runtime_coverage", [])),
+            "infra_error": state.get("playtest_infra_error", False),
+        }
     (output_dir / "run_metadata.json").write_text(
         json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8"
     )
@@ -1131,6 +1363,10 @@ def save_report(state: dict, output_dir: Path) -> None:
         ("code_review_errors",    "code_review_errors.json"),
         ("agent_status",          "agent_status.json"),
         ("fix_results",           "fix_results.json"),
+        ("playtest_results",      "playtest_results.json"),
+        ("fix_verify_results",    "fix_verify_results.json"),
+        ("observed_signals",      "observed_signals.json"),
+        ("runtime_coverage",      "runtime_coverage.json"),
     ]:
         (output_dir / filename).write_text(
             json.dumps(state.get(key, []), indent=2, ensure_ascii=False),

@@ -175,8 +175,13 @@ def load_or_build_index(
     if not force_rebuild and cache_path.exists():
         try:
             cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            # The cache is per-DIRECTORY but projects differ — a cached index
+            # built for another project must never be served. (Observed: a
+            # test's toy project poisoned the shared cache file.)
+            same_project = (
+                cached.get("project_root") == str(project_root.resolve()))
             # Accept cache if the stored snapshot covers the current source mtime
-            if cached.get("source_mtime_snapshot", 0.0) >= src_mtime:
+            if same_project and cached.get("source_mtime_snapshot", 0.0) >= src_mtime:
                 _log.info("[build_index] loaded from cache (%d scripts)", len(cached.get("scripts", {})))
                 return cached, cache_path
         except (OSError, json.JSONDecodeError):
@@ -185,6 +190,7 @@ def load_or_build_index(
     _log.info("[build_index] building fresh index for %s …", project_root)
     index = build_project_index(project_root)
     index["source_mtime_snapshot"] = src_mtime   # store for next-run cache check
+    index["project_root"] = str(project_root.resolve())
     write_index(index, cache_path)
     _log.info(
         "[build_index] built in %.2fs — %d scripts, %d scenes, %d classes → %s",

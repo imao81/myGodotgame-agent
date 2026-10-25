@@ -1,0 +1,71 @@
+{
+  "model": "kimi-k3",
+  "provider": "kimi",
+  "n_mutants": 26,
+  "detected": 19,
+  "recall": 0.7308,
+  "errors": [],
+  "missed": [
+    {
+      "mutant_id": "m001",
+      "file": "ships/guns/projectiles/projectile.gd",
+      "operator": "rename_emitted_signal",
+      "description": "Emits Events.damaged_broken which is not declared in the Events autoload"
+    },
+    {
+      "mutant_id": "m004",
+      "file": "world/spawners/station_spawner.gd",
+      "operator": "rename_emitted_signal",
+      "description": "Emits Events.station_spawned_broken which is not declared in the Events autoload"
+    },
+    {
+      "mutant_id": "m012",
+      "file": "ui/minimap/map_view.gd",
+      "operator": "break_preload_path",
+      "description": "Preloads res://ui/minimap/map_sprite_missing.tscn which does not exist on disk"
+    },
+    {
+      "mutant_id": "m015",
+      "file": "ui/menus/upgrades/upgrade_menu.gd",
+      "operator": "rename_emitted_signal",
+      "description": "Emits Events.upgrade_chosen_broken which is not declared in the Events autoload"
+    },
+    {
+      "mutant_id": "m017",
+      "file": "ships/player/cargo.gd",
+      "operator": "dead_guard_emission",
+      "description": "Events.force_undock.emit() is unreachable behind `if false:`"
+    },
+    {
+      "mutant_id": "m019",
+      "file": "ships/enemies/pirate/states/attack.gd",
+      "operator": "rename_emitted_signal",
+      "description": "Emits Events.call_off_pursuit_broken which is not declared in the Events autoload"
+    },
+    {
+      "mutant_id": "m022",
+      "file": "world/spawners/asteroid_cluster.gd",
+      "operator": "rename_emitted_signal",
+      "description": "Emits Events.asteroid_spawned_broken which is not declared in the Events autoload"
+    }
+  ],
+  "by_operator": {
+    "rename_emitted_signal": {
+      "total": 12,
+      "detected": 7
+    },
+    "break_preload_path": {
+      "total": 5,
+      "detected": 4
+    },
+    "dead_guard_emission": {
+      "total": 4,
+      "detected": 3
+    },
+    "rename_class_reference": {
+      "total": 5,
+      "detected": 5
+    }
+  },
+  "wall_seconds": 371.2
+}

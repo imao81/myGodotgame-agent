@@ -601,6 +601,27 @@ python -m pytest tests/test_llm_client.py
 python -m pytest tests/ -v
 ```
 
+## Evaluation Datasets (precision vs recall)
+
+One dataset can't measure both. This project keeps two, on purpose:
+
+- **`eval/golden_set.jsonl` — precision.** 49 past pipeline findings with
+  human verdicts (`tp`/`fp`/`partial`) and reviewer notes. It answers "of the
+  things we report, how many are real?" It cannot answer "of the bugs that
+  exist, how many do we find?" — bugs no run ever produced are invisible to
+  it. `python eval/run_eval.py` prints the benchmark.
+- **`eval/mutant_set.jsonl` — recall.** Built by `eval/mutant_eval.py`: the
+  game project is copied, and one known bug per file is mechanically
+  injected (renamed signal emissions, dead-guarded emissions, broken preload
+  paths, undefined class references — each maps to a bug class the pipeline
+  claims to catch). Detection is binary ground truth, so
+  `recall = detected / injected` finally has a denominator. The game repo is
+  never touched; mutants live in a gitignored copy under `.kimi/`.
+
+Known limitation, stated plainly: injected bugs are cleaner than natural
+ones (real bugs don't announce their type), so mutant recall is an upper
+bound of true recall. Precision stays with the natural golden set.
+
 ## Troubleshooting
 
 ### "Godot executable not found"

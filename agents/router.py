@@ -44,16 +44,19 @@ _ARM_TABLE: list[dict] = [
      "model": os.environ.get("DEEPSEEK_FLASH_MODEL", "deepseek-v4-flash"),
      "rel_cost": 0.7, "requires_key": "DEEPSEEK_API_KEY"},
     {"name": "kimi-highspeed", "provider": "kimi",
+     # thinking forced on this family — expect slow/expensive, bandit will learn
      "model": "kimi-k2.7-code-highspeed", "rel_cost": 1.0,
      "requires_key": "MOONSHOT_API_KEY"},
     {"name": "deepseek-pro", "provider": "deepseek",
      "model": os.environ.get("DEEPSEEK_TEXT_MODEL", "deepseek-v4-pro"),
      "rel_cost": 1.5, "requires_key": "DEEPSEEK_API_KEY"},
     {"name": "kimi-standard", "provider": "kimi",
-     "model": "kimi-k2.7-code", "rel_cost": 2.0,
+     # kimi-k3: thinking can be disabled (forced on k2.7-code family)
+     "model": os.environ.get("KIMI_TEXT_MODEL", "kimi-k3"), "rel_cost": 2.0,
      "requires_key": "MOONSHOT_API_KEY"},
-    {"name": "kimi-k3", "provider": "kimi",
-     "model": "kimi-k3", "rel_cost": 4.0,
+    {"name": "kimi-k27-thinking", "provider": "kimi",
+     # heavy tier: forced reasoning — quality ceiling, cost floor
+     "model": "kimi-k2.7-code", "rel_cost": 4.0,
      "requires_key": "MOONSHOT_API_KEY"},
     {"name": "claude-sonnet", "provider": "claude",
      "model": "claude-sonnet-4-6", "rel_cost": 8.0,

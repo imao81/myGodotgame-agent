@@ -137,7 +137,7 @@ class TestArms(unittest.TestCase):
     def test_available_arms_filtered_by_keys(self):
         with mock.patch.dict(os.environ, {"MOONSHOT_API_KEY": "k"}, clear=True):
             names = [a["name"] for a in available_arms()]
-        self.assertEqual(names, ["kimi-highspeed", "kimi-standard", "kimi-k3"])
+        self.assertEqual(names, ["kimi-highspeed", "kimi-standard", "kimi-k27-thinking"])
 
     def test_deepseek_key_adds_two_arms(self):
         with mock.patch.dict(os.environ, {"DEEPSEEK_API_KEY": "d"}, clear=True):
@@ -362,7 +362,7 @@ class TestCodeReviewRouting(unittest.TestCase):
                 **gap._default_state(str(root), True),
                 "routing_plan": {
                     "a.gd": {"arm": "kimi-standard", "provider": "kimi",
-                             "model": "kimi-k2.7-code", "rel_cost": 2.0,
+                             "model": "kimi-k3", "rel_cost": 2.0,
                              "context": [1.0] * 9},
                 },
                 "routing_stats": {"arms": ["kimi-highspeed", "kimi-standard"]},

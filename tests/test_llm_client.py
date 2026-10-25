@@ -135,7 +135,7 @@ class TestLLMClientConstruction(unittest.TestCase):
 class TestModelNames(unittest.TestCase):
 
     def test_kimi_text_model_is_correct(self):
-        self.assertEqual(_KIMI_TEXT_MODEL, "kimi-k2.7-code")
+        self.assertEqual(_KIMI_TEXT_MODEL, "kimi-k3")
 
     def test_claude_text_model_is_correct(self):
         self.assertEqual(_CLAUDE_TEXT_MODEL, "claude-sonnet-4-6")

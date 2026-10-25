@@ -14,8 +14,10 @@ preload() or class_name declaration:
     PhysicsServer2D, RenderingServer, DisplayServer, AudioServer,
     ResourceLoader, ResourceSaver, Time, ClassDB
 
-The project context block (if present above the code) lists cross-file dependencies.
-Use it to avoid false positives on class_names, node types, and signals.
+The project context block (if present above the code) lists cross-file dependencies
+and may include a "Scene tree:" excerpt. Treat that excerpt as authoritative for
+node-path and node-type findings. Use it to avoid false positives on class_names,
+node types, and signals.
 
 ==============================================================================
 OUTPUT FORMAT — READ THIS CAREFULLY
@@ -59,10 +61,15 @@ Use exactly one assertion per finding.  Choose the type that best matches:
              "scene_file": "res://ships/enemies/pirate/pirate_ship.tscn"}
 
 3. identifier_not_defined
-   Use when: an identifier (class_name, autoload, constant) appears undefined.
+   Use when: an identifier (class_name, autoload, constant, or property/method
+             accessed on a typed object) appears undefined in its scope.
    Fields:  identifier (str), suggested_match (str, optional), search_scope (str, optional)
    Example: {"type": "identifier_not_defined", "identifier": "Projectile",
              "suggested_match": ""}
+   NOTE: For dynamically-typed callback parameters (e.g. `body` in
+         `_on_body_entered(body)`), set `search_scope` to the parameter name
+         when you are asserting that the parameter's known type does not
+         define the identifier.
 
 4. signal_not_declared
    Use when: a signal is emitted/connected but never declared in the script
@@ -72,6 +79,8 @@ Use exactly one assertion per finding.  Choose the type that best matches:
 5. node_not_found
    Use when: the code accesses a node path that does not exist in the scene.
    Fields:  node_path (str), scene_file (str, res:// path)
+   NOTE: Use this for `@onready var x = $NodePath` and `$NodePath` accesses
+         when the provided scene tree shows the path is missing.
 
 6. file_not_exists
    Use when: a preload/load/reference points to a file that does not exist.
@@ -138,6 +147,54 @@ Example 2 — missing type hint (warning finding, no matching assertion type):
     }
   }
 
+Example 3 — unvalidated dynamic property access in a collision callback (error finding):
+  Scenario: docking_point.gd line 61 reads `body.dockables[0]` inside
+  `_on_body_entered(body)`. The parameter has no type hint and the Area2D can
+  be entered by any physics body.
+
+  {
+    "line": 61,
+    "severity": "error",
+    "category": "type_safety",
+    "message": "Area2D callback accesses body.dockables without validating that body is the expected Player type. Any physics body entering the area crashes with 'Invalid get index'.",
+    "assertion": {
+      "type": "identifier_not_defined",
+      "identifier": "dockables",
+      "search_scope": "body"
+    }
+  }
+
+Example 4 — missing @onready node path (error finding):
+  Scenario: station_spawner.gd line 10 declares
+  `@onready var player_ship: PlayerShip = $PlayerShip`, but the scene tree
+  provided in the context has no node at that path.
+
+  {
+    "line": 10,
+    "severity": "error",
+    "category": "node_reference",
+    "message": "@onready var references $PlayerShip, but the scene tree does not contain a node at that path. _ready() will crash when the path is resolved.",
+    "assertion": {
+      "type": "node_not_found",
+      "node_path": "$PlayerShip",
+      "scene_file": "res://world/spawners/station_spawner.tscn"
+    }
+  }
+
+Example 5 — await on a signal that may never fire (warning finding):
+  Scenario: spawn.gd line 16 calls `await owner.ready` inside `_ready()` of a
+  dynamically instantiated State node whose owner may not be in the scene tree.
+
+  {
+    "line": 16,
+    "severity": "warning",
+    "category": "async_misuse",
+    "message": "await owner.ready inside _ready() of a dynamically instantiated State. If owner is not in the scene tree, the ready signal never fires and the state deadlocks.",
+    "assertion": {
+      "type": "unverifiable"
+    }
+  }
+
 ==============================================================================
 SEVERITY RULES
 ==============================================================================
@@ -152,6 +209,10 @@ SEVERITY RULES
   multiple times
 - Array/Dictionary access without key existence check when the key is not
   guaranteed
+- Accessing properties on dynamically-typed collision-callback parameters
+  (e.g. `body.dockables`) without type validation
+- Accessing a `$NodePath` or `get_node(...)` path that the provided scene tree
+  shows does not exist
 
 "error" does NOT require the path to be triggered in normal gameplay.
 If the code path EXISTS and WILL crash when reached, it is an error.
@@ -165,6 +226,8 @@ it does not downgrade the severity.
 - Redundant await that works but adds noise
 - Performance concerns (per-frame allocations)
 - Signal patterns that could leak but have mitigating factors
+- `await <node>.ready` in _ready() when the target is not guaranteed to be in
+  the scene tree
 
 "info" — pure style or documentation suggestions
 
@@ -178,12 +241,30 @@ REVIEW CHECKLIST
 
 Review the following file for:
 1. Logic bugs in state machine transitions (missing cleanup, double-transitions)
-2. Performance: per-frame allocations in _process/_physics_process, repeated get_node() calls
-3. Signal hygiene: connected in _ready (good) vs _process (bad), disconnected on exit
-4. Resource leaks: nodes added but never freed, timers not stopped
-5. Type safety: missing type hints where neither `:` nor `:=` is used
-6. GDScript style: snake_case, no magic numbers, clear variable names
-7. Async misuse: `await` on constructors or in non-async contexts
+2. Scene-tree correctness:
+   - Cross-check every `@onready var ... = $NodePath`, `$NodePath`, and
+     `get_node(...)` against the scene tree in the context.
+   - If the path is missing, report `node_not_found` severity error.
+   - Use exact node paths from the context. Do NOT invent intermediate parents
+     (e.g. `$Sprite2D/$PlayerRotationRig` when the tree shows
+     `$PlayerRotationRig` as a direct child).
+3. Collision-callback safety:
+   - In `_on_body_entered(body)`, `_on_body_exited(body)`, and similar
+     callbacks, if `body` is dynamically typed or typed broadly (Node,
+     Node2D, PhysicsBody2D) and the code reads/writes properties such as
+     `body.dockables` without `has_method`, `in`, cast, or type checks,
+     report an error. Prefer `identifier_not_defined` for the property.
+4. Async misuse:
+   - `await` on constructors or at class-level.
+   - `await <node>.ready` inside `_ready()` when the node/owner is not
+     guaranteed to be in the scene tree (e.g. dynamically instantiated State
+     nodes).
+5. Performance: per-frame allocations in _process/_physics_process, repeated
+   get_node() calls — only flag when clearly in a hot path.
+6. Signal hygiene: connected in _ready (good) vs _process (bad), disconnected on exit
+7. Resource leaks: nodes added but never freed, timers not stopped
+8. Type safety: missing type hints where neither `:` nor `:=` is used
+9. GDScript style: snake_case, no magic numbers, clear variable names
 
 Do NOT flag:
 - class_names listed in "Available class_names"
@@ -192,7 +273,16 @@ Do NOT flag:
 - `@export var x: Type` as "lacks type hint"
 - `@onready var x := $Node` as "lacks type hint"
 - Unused signals (project has gdscript/warnings/unused_signal=false)
-- Node paths unless the scene context shows the node does not exist
+- Node paths unless the scene context explicitly shows the node does not exist
+  or has a conflicting type
+- "This looks fine" or purely informational observations
+- Style nits such as "this member variable could be a local variable"
+- Per-frame property assignments (e.g. setting `global_position`) unless they
+  cause a concrete bug or measurable allocation
+- Ordering assumptions such as "method X is called before add_child()" unless
+  the called API explicitly requires the node to be inside the scene tree
+- Node type guesses based only on the fact that a class_name is known in the
+  project context
 
 ==============================================================================
 

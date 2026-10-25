@@ -64,9 +64,15 @@ if TYPE_CHECKING:
 _CLAUDE_TEXT_MODEL = "claude-sonnet-4-6"
 _CLAUDE_VISION_MODEL = "claude-sonnet-4-6"
 # Model names change over time — env vars override the defaults
-_KIMI_TEXT_MODEL = os.environ.get("KIMI_TEXT_MODEL", "kimi-k2.7-code")
+# Default review tier is kimi-k3: thinking can be disabled on it, unlike the
+# k2.7-code family where thinking is FORCED (Moonshot API: "only type=enabled
+# is allowed") and the reasoning chain burns the whole token budget.
+_KIMI_TEXT_MODEL = os.environ.get("KIMI_TEXT_MODEL", "kimi-k3")
 _KIMI_VISION_MODEL = os.environ.get("KIMI_VISION_MODEL", "moonshot-v1-8k-vision-preview")
 _DEEPSEEK_TEXT_MODEL = os.environ.get("DEEPSEEK_TEXT_MODEL", "deepseek-v4-pro")
+
+# Kimi models that reject thinking=disabled (verified 2026-10-25).
+_KIMI_THINKING_FORCED = frozenset({"kimi-k2.7-code", "kimi-k2.7-code-highspeed"})
 
 # OpenAI-compatible provider endpoints
 _OPENAI_COMPAT = {
@@ -218,14 +224,19 @@ class LLMClient:
     def _chat_compat(self, provider: str, default_model: str,
                      messages: list[ChatCompletionMessageParam], max_tokens: int) -> str:
         extra: dict = {}
-        # DeepSeek V4 enables thinking mode by default — the reasoning chain
-        # eats the entire token budget and content comes back EMPTY (observed:
-        # 8192/8192 completion tokens, zero content). Opt out per-request
-        # unless DEEPSEEK_THINKING=1.
+        # Thinking mode burns the token budget on reasoning before content.
+        # DeepSeek V4 / Kimi K3,K2.6: thinking is ON by default → disable it
+        # unless the user opts in. Kimi k2.7-code family: thinking is FORCED
+        # by the API (passing disabled → 400), so we don't send the param.
+        # Observed failure mode: completion_tokens == cap, content EMPTY.
+        model = self._model or default_model
         if provider == "deepseek" and os.environ.get("DEEPSEEK_THINKING", "0") != "1":
             extra["extra_body"] = {"thinking": {"type": "disabled"}}
+        elif (provider == "kimi" and model not in _KIMI_THINKING_FORCED
+                and os.environ.get("KIMI_THINKING", "0") != "1"):
+            extra["extra_body"] = {"thinking": {"type": "disabled"}}
         response = self._get_compat_client(provider).chat.completions.create(
-            model=self._model or default_model,
+            model=model,
             max_tokens=max_tokens,
             messages=messages,
             **extra,

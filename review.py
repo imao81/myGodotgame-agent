@@ -84,8 +84,11 @@ _ADDON_DIRS: frozenset[str] = frozenset({"addons", "libraries"})
 # Minimum source lines to bother reviewing (stub files add noise)
 _MIN_LINES = 5
 
-# Max tokens for LLM review response
-_MAX_TOKENS = 1536
+# Max tokens for LLM review response. Thinking-model tiers (Kimi K2.7,
+# DeepSeek V4) spend tokens on reasoning before content: at 1536 the response
+# regularly hits the cap mid-thought and returns EMPTY content (observed in
+# production: completion_tokens == cap, zero body, silently zero findings).
+_MAX_TOKENS = 4096
 
 # ── LLMProvider interface ──────────────────────────────────────────────────────
 

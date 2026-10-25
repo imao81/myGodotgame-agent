@@ -1,0 +1,60 @@
+{
+  "model": "kimi-k3",
+  "provider": "kimi",
+  "files": 32,
+  "golden_findings": 48,
+  "base": {
+    "fitness": -0.5831,
+    "recall_true": 0.4884,
+    "fp_repro_rate": 0.5714,
+    "novel_count": 130,
+    "novel_penalty": 0.5,
+    "matched_true": 10.5,
+    "matched_fp": 12,
+    "missed_true": 14,
+    "n_produced": 155,
+    "errors": 0,
+    "wall_seconds": 406.1,
+    "missed_files": [
+      "ships/enemies/pirate/states/patrol.gd",
+      "ships/player/animated_bar.gd",
+      "ships/player/player_gun.gd",
+      "ships/player/states/dock.gd",
+      "ships/player/stats_gun.gd",
+      "ships/player/stats_ship.gd",
+      "ui/main_menu.gd",
+      "ui/main_menu_texts.gd",
+      "ui/menus/upgrades/upgrade_menu.gd",
+      "ui/minimap/map_display.gd",
+      "vfx/distortion_emitter.gd",
+      "world/docking_point/docking_point.gd"
+    ]
+  },
+  "evolved": {
+    "fitness": -0.253,
+    "recall_true": 0.6279,
+    "fp_repro_rate": 0.381,
+    "novel_count": 98,
+    "novel_penalty": 0.5,
+    "matched_true": 13.5,
+    "matched_fp": 8,
+    "missed_true": 10,
+    "n_produced": 123,
+    "errors": 0,
+    "wall_seconds": 388.7,
+    "missed_files": [
+      "ships/player/player_gun.gd",
+      "ships/player/states/dock.gd",
+      "ships/player/stats_gun.gd",
+      "ships/player/stats_ship.gd",
+      "ships/stats.gd",
+      "ui/main_menu.gd",
+      "ui/main_menu_texts.gd",
+      "ui/menus/upgrades/upgrade_menu.gd",
+      "vfx/distortion_emitter.gd",
+      "world/spawners/pirate_spawner.gd"
+    ]
+  },
+  "fitness_delta": 0.3301,
+  "verdict": "evolved WINS on production tier"
+}

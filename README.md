@@ -64,10 +64,20 @@ enough to put it in front of a human.
                            │      report_merger     │
                            └──────────┬─────────────┘
                                       ▼
-                                    ┌─────┐
-                                    │ END │
-                                    └─────┘
+                        ┌─────────────────────────┐
+                        │  human_gate (interrupt) │  ◄── only with --auto-fix:
+                        └──────────┬──────────────┘      pauses for human approval
+                                   ▼
+                            ┌────────────┐     ┌─────┐
+                            │  auto_fix  │────▶│ END │
+                            └────────────┘     └─────┘
 ```
+
+Every node boundary is persisted to a SQLite checkpointer
+(`.kimi/checkpoints/pipeline.sqlite`), so a crashed run can pick up where it
+stopped instead of starting over — see `--resume` below. One honest caveat:
+checkpoints are per *node*, so a crash in the middle of `code_review` (the long
+per-file loop) re-runs that node from its start.
 
 ### Pipeline Nodes
 
@@ -82,6 +92,8 @@ enough to put it in front of a human.
 | `filter_refuted` | Remove refuted (final_severity="drop") findings |
 | `findings_dedup` | Cascading deduplication |
 | `report_merger` | Generate final markdown + JSON reports |
+| `human_gate` | `--auto-fix` only: interrupt the graph and wait for a human to approve or reject the fix plan |
+| `auto_fix` | `--auto-fix` only: apply LLM fixes for error findings (git stash + `godot --check-only` protected) |
 
 ## Quick Start — Full Command Chain
 
@@ -183,6 +195,42 @@ python game_agent_pipeline.py --project "../godot-2d-space-game/project" --no-di
 python game_agent_pipeline.py --project "../godot-2d-space-game/project" --output "./my-reports"
 ```
 
+### Crash Recovery and Human-in-the-Loop Auto-Fix
+
+Every run writes checkpoints as it goes. If something kills the pipeline halfway
+(power, Ctrl-C at the wrong moment, a Godot crash that outlived its retries),
+you don't start over:
+
+```bash
+# Pick up from the last completed node
+python game_agent_pipeline.py --project "../godot-2d-space-game/project" --resume
+```
+
+Pass `--auto-fix` when you want the pipeline to go one step further than
+reporting: after the report is ready, the graph **stops and waits for you**.
+Look at `reports/<timestamp>/final_report.md`, then decide — the fix only
+happens if a human says yes:
+
+```bash
+python game_agent_pipeline.py --project "../godot-2d-space-game/project" --auto-fix
+# ... pipeline runs, report is saved, then it pauses:
+#     "Apply auto-fix to these error findings? [y/N]"
+
+# Headless / CI: the pause prints a resume command instead of prompting —
+python game_agent_pipeline.py --project "../godot-2d-space-game/project" --resume --approve
+python game_agent_pipeline.py --project "../godot-2d-space-game/project" --resume --reject
+```
+
+Approved fixes still go through the safety rails from the standalone auto-fixer:
+a labelled `git stash` before any write, and each rewritten file must pass
+`godot --check-only` or the original is restored.
+
+Retries are declared on the graph, not hand-rolled: `pipeline_check` carries a
+LangGraph `retry_policy` (3 attempts, exponential backoff) for transient Godot
+subprocess failures. `code_review` deliberately keeps its own *per-file* retry
+— retrying the whole node would mean re-reviewing every file after one flaky
+API call.
+
 ### Exit Codes
 
 `game_agent_pipeline.py` exits with a quality-gate code (same convention as `review.py`):
@@ -232,6 +280,7 @@ reports/20250328_161030/
 ├── correlated_findings.json # Cross-correlated issues
 ├── deduplicated_findings.json
 ├── agent_status.json        # Per-node execution status
+├── fix_results.json         # Auto-fix outcomes (only with --auto-fix)
 └── ...
 ```
 
@@ -384,6 +433,12 @@ harvester-agent/
 
 # Disable experience memory (A/B baseline)
 --no-memory
+
+# Append human-gated auto-fix to the graph
+--auto-fix
+
+# Resume from the last checkpoint (after a crash or a human-gate pause)
+--resume [--approve | --reject]
 ```
 
 ## Testing

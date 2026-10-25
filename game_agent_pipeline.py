@@ -18,20 +18,38 @@ Graph topology:
               ↓
         findings_dedup
               ↓
-        report_merger ──► END
+        report_merger ──► END            [default]
+              ↓                          [--auto-fix only]
+        human_gate (interrupt ── human approval checkpoint)
+              ↓ approved
+        auto_fix ──► END
 
-Human review happens OUTSIDE the graph: inspect reports/REVIEW_<ts>/verified_report.md,
-then optionally run:  python review.py --apply-config reports/REVIEW_<ts>/verified_report.json
+Production features:
+  - SqliteSaver checkpointer (.kimi/checkpoints/pipeline.sqlite) — every node
+    boundary is persisted, so a crashed run resumes with --resume instead of
+    restarting. Granularity is node-level: a crash inside code_review re-runs
+    that node (per-file resume is future work).
+  - --auto-fix wires a human approval gate (LangGraph interrupt) into the
+    graph: the pipeline pauses after the report, a human approves/rejects,
+    then auto_fix writes fixes (git stash + godot --check-only protected).
+  - Declarative retry_policy on pipeline_check (transient Godot subprocess
+    errors); code_review keeps per-file retry because node-level retry would
+    re-run the whole ~30min review loop.
 
 Usage:
   python game_agent_pipeline.py --project "../godot-2d-space-game/project"
   python game_agent_pipeline.py --project "../godot-2d-space-game/project" --no-display
+  python game_agent_pipeline.py --project ... --auto-fix      # pause for approval
+  python game_agent_pipeline.py --project ... --resume        # resume after crash
+  python game_agent_pipeline.py --project ... --resume --approve   # answer the gate
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import time
@@ -42,6 +60,7 @@ from typing import Annotated, Optional
 
 from dotenv import load_dotenv
 from langgraph.graph import StateGraph, START, END
+from langgraph.types import Command, RetryPolicy, interrupt
 from typing_extensions import TypedDict
 from rich.console import Console
 from rich.panel import Panel
@@ -112,8 +131,14 @@ class GameReport(TypedDict):
     summary: str
     overall_health: str
 
+    # Auto-fix (--auto-fix only)
+    output_dir: str                       # report dir; carried in checkpoints so --resume reuses it
+    auto_fix_approved: bool               # set by the human_gate interrupt
+    fix_results: list[dict]               # per-file outcome records from auto_fix
+    fix_summary: str
 
-def _default_state(project_path: str, no_display: bool) -> GameReport:
+
+def _default_state(project_path: str, no_display: bool, output_dir: str = "") -> GameReport:
     return GameReport(
         project_path=str(Path(project_path).resolve()),
         no_display=no_display,
@@ -135,6 +160,10 @@ def _default_state(project_path: str, no_display: bool) -> GameReport:
         agent_status={},
         summary="",
         overall_health="unknown",
+        output_dir=output_dir,
+        auto_fix_approved=False,
+        fix_results=[],
+        fix_summary="",
     )
 
 
@@ -142,29 +171,13 @@ def _default_state(project_path: str, no_display: bool) -> GameReport:
 
 _SEV_RANK: dict[str, int] = {"critical": 4, "error": 3, "warning": 2, "info": 1}
 
+# Errors worth retrying at the node level (framework retry_policy). Everything
+# else raised inside a node is a permanent failure → static fallback or abort.
+_TRANSIENT_ERRORS = (subprocess.TimeoutExpired, OSError)
+
 
 def _elapsed(t0: float) -> str:
     return f"{time.perf_counter() - t0:.1f}s"
-
-
-def _run_with_retry(fn, state: GameReport, max_retries: int = 3,
-                    fallback_fn=None) -> dict:
-    """Run a callable with exponential-backoff retry and optional static fallback."""
-    last_exc: Exception | None = None
-    for attempt in range(max_retries):
-        try:
-            return fn(state)
-        except Exception as e:
-            last_exc = e
-            if attempt < max_retries - 1:
-                wait = 2 ** attempt
-                console.log(f"[yellow]  Retry {attempt + 1}/{max_retries - 1} "
-                             f"in {wait}s — {e}[/yellow]")
-                time.sleep(wait)
-    if fallback_fn is not None:
-        console.log(f"[yellow]  All retries exhausted — using fallback ({last_exc})[/yellow]")
-        return fallback_fn(state)
-    raise last_exc  # type: ignore[misc]
 
 
 # ── Scope resolution helpers ───────────────────────────────────────────────────
@@ -442,21 +455,27 @@ def _pipeline_check_fallback(_: dict) -> dict:
 
 
 def pipeline_check_node(state: GameReport) -> dict:
+    """Static Godot checks. Registered with a declarative retry_policy.
+
+    Transient infra errors (subprocess timeout, OS errors) propagate so the
+    framework retries the node; permanent errors degrade to the static fallback.
+    If retries are exhausted the run fails — resume it with --resume.
+    """
     t0 = time.perf_counter()
     console.log("[bold cyan]▶ Pipeline Check[/bold cyan]")
 
-    def _run(s: dict) -> dict:
-        from agents.pipeline_check import run
-        return run(s)
-
     try:
-        result = _run_with_retry(_run, state, fallback_fn=_pipeline_check_fallback)
-        n = len(result.get("pipeline_issues", []))
-        console.log(f"[cyan]  {n} issue(s) ({_elapsed(t0)})[/cyan]")
-        return result
+        from agents.pipeline_check import run
+        result = run(state)
+    except _TRANSIENT_ERRORS:
+        raise
     except Exception as e:
-        console.log(f"[red]  Pipeline check failed: {e}[/red]")
-        return {"pipeline_issues": [], "agent_status": {"pipeline_check": f"failed: {e}"}}
+        console.log(f"[yellow]  Pipeline check failed ({e}) — static fallback[/yellow]")
+        result = _pipeline_check_fallback(state)
+
+    n = len(result.get("pipeline_issues", []))
+    console.log(f"[cyan]  {n} issue(s) ({_elapsed(t0)})[/cyan]")
+    return result
 
 
 # ── Node: code_review ─────────────────────────────────────────────────────────
@@ -928,16 +947,90 @@ def report_merger_node(state: GameReport) -> dict:
     return {"summary": "\n".join(lines), "overall_health": overall_health}
 
 
+# ── Nodes: human_gate + auto_fix (--auto-fix only) ────────────────────────────
+
+_ERROR_SEVERITIES = ("critical", "error")
+
+
+def _error_findings(state: GameReport) -> list[dict]:
+    return [f for f in state.get("deduplicated_findings", [])
+            if f.get("final_severity") in _ERROR_SEVERITIES]
+
+
+def human_gate_node(state: GameReport) -> dict:
+    """Pause the graph for human approval before auto_fix rewrites files.
+
+    Uses LangGraph interrupt(): the run suspends here, the checkpoint holds the
+    full state, and the caller resumes with Command(resume=True|False).
+    """
+    errors = _error_findings(state)
+    if not errors:
+        console.log("[dim]▶ Human Gate: no error findings — auto-fix skipped[/dim]")
+        return {
+            "auto_fix_approved": False,
+            "agent_status": {"human_gate": "skipped:no_errors"},
+        }
+
+    files = sorted({f.get("file", "") for f in errors})
+    approved = interrupt({
+        "question": "Apply auto-fix to these error findings?",
+        "error_count": len(errors),
+        "files": files,
+    })
+    console.log(f"[cyan]▶ Human Gate: {'approved' if approved else 'rejected'}[/cyan]")
+    return {
+        "auto_fix_approved": bool(approved),
+        "agent_status": {"human_gate": "approved" if approved else "rejected"},
+    }
+
+
+def auto_fix_node(state: GameReport) -> dict:
+    """Apply LLM fixes for error findings. Only reachable through human_gate."""
+    console.log("[bold cyan]▶ Auto Fix[/bold cyan]")
+
+    if not state.get("auto_fix_approved"):
+        no_errors = not _error_findings(state)
+        return {
+            "fix_results": [],
+            "fix_summary": ("No error-severity findings to fix." if no_errors
+                            else "Auto-fix rejected at the human gate."),
+            "agent_status": {"auto_fix": "skipped:no_errors" if no_errors else "rejected"},
+        }
+
+    code_issues = [
+        {"file": f.get("file"), "line": f.get("line"), "severity": "error",
+         "rule": f.get("rule", ""), "message": f.get("message", "")}
+        for f in _error_findings(state)
+    ]
+    from agents.auto_fix import run as auto_fix_run
+    result = auto_fix_run(
+        {"project_path": state["project_path"], "code_issues": code_issues},
+        apply=True,
+    )
+    console.log(f"[cyan]  {result['fix_summary']}[/cyan]")
+    return {
+        "fix_results": result["fix_results"],
+        "fix_summary": result["fix_summary"],
+        "agent_status": result["agent_status"],
+    }
+
+
 # ── Build LangGraph ────────────────────────────────────────────────────────────
 
-def build_graph():
-    """Compile the 9-node LangGraph pipeline.
+def build_graph(checkpointer=None, with_auto_fix: bool = False):
+    """Compile the LangGraph pipeline.
 
     Node sequence:
       preflight_check → build_index → resolve_scope →
       [pipeline_check ‖ code_review] →
       cross_correlator → filter_refuted → findings_dedup →
-      report_merger
+      report_merger → [human_gate → auto_fix]  (--auto-fix only)
+
+    Args:
+        checkpointer:  e.g. SqliteSaver — persists state at every node boundary
+                       so a crashed/interrupted run can resume (requires one for
+                       the human_gate interrupt).
+        with_auto_fix: append the human_gate → auto_fix tail after report_merger.
 
     Visualise with:
         app = build_graph()
@@ -948,7 +1041,14 @@ def build_graph():
     graph.add_node("preflight_check",  preflight_check_node)
     graph.add_node("build_index",      build_index_node)
     graph.add_node("resolve_scope",    resolve_scope_node)
-    graph.add_node("pipeline_check",   pipeline_check_node)
+    graph.add_node("pipeline_check",   pipeline_check_node,
+                   retry_policy=RetryPolicy(
+                       max_attempts=3, initial_interval=1.0,
+                       backoff_factor=2.0, jitter=True,
+                       # default_retry_on excludes OSError as "deterministic";
+                       # for us a vanished/crashed Godot binary is transient.
+                       retry_on=_TRANSIENT_ERRORS,
+                   ))
     graph.add_node("code_review",      code_review_node)
     graph.add_node("cross_correlator", cross_correlator_node)
     graph.add_node("filter_refuted",   filter_refuted_node)
@@ -975,13 +1075,21 @@ def build_graph():
     graph.add_edge("pipeline_check", "cross_correlator")
     graph.add_edge("code_review",    "cross_correlator")
 
-    # cross_correlator → filter_refuted → findings_dedup → report_merger → END
+    # cross_correlator → filter_refuted → findings_dedup → report_merger
     graph.add_edge("cross_correlator", "filter_refuted")
     graph.add_edge("filter_refuted",   "findings_dedup")
     graph.add_edge("findings_dedup",   "report_merger")
-    graph.add_edge("report_merger",    END)
 
-    return graph.compile()
+    if with_auto_fix:
+        graph.add_node("human_gate", human_gate_node)
+        graph.add_node("auto_fix",   auto_fix_node)
+        graph.add_edge("report_merger", "human_gate")
+        graph.add_edge("human_gate",    "auto_fix")
+        graph.add_edge("auto_fix",      END)
+    else:
+        graph.add_edge("report_merger", END)
+
+    return graph.compile(checkpointer=checkpointer)
 
 
 # ── Save outputs ───────────────────────────────────────────────────────────────
@@ -1004,6 +1112,11 @@ def save_report(state: dict, output_dir: Path) -> None:
     }
     if fallback_mode == "static_only":
         metadata["degradation_reason"] = state.get("degradation_reason") or "unknown"
+    if state.get("fix_summary"):
+        metadata["auto_fix"] = {
+            "approved": state.get("auto_fix_approved", False),
+            "summary": state["fix_summary"],
+        }
     (output_dir / "run_metadata.json").write_text(
         json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8"
     )
@@ -1017,6 +1130,7 @@ def save_report(state: dict, output_dir: Path) -> None:
         ("deduplicated_findings", "deduplicated_findings.json"),
         ("code_review_errors",    "code_review_errors.json"),
         ("agent_status",          "agent_status.json"),
+        ("fix_results",           "fix_results.json"),
     ]:
         (output_dir / filename).write_text(
             json.dumps(state.get(key, []), indent=2, ensure_ascii=False),
@@ -1028,6 +1142,63 @@ def save_report(state: dict, output_dir: Path) -> None:
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
+def _thread_id_for(project_path: str) -> str:
+    """Stable per-project thread id, so --resume can find the checkpoint."""
+    digest = hashlib.sha1(str(Path(project_path).resolve()).encode()).hexdigest()
+    return f"pipeline-{digest[:12]}"
+
+
+def _make_checkpointer():
+    """SqliteSaver over .kimi/checkpoints/pipeline.sqlite (gitignored)."""
+    from langgraph.checkpoint.sqlite import SqliteSaver
+    db_dir = _PIPELINE_ROOT / ".kimi" / "checkpoints"
+    db_dir.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_dir / "pipeline.sqlite"), check_same_thread=False)
+    return SqliteSaver(conn)
+
+
+def _health_exit_code(state: dict) -> int:
+    if state.get("abort"):
+        return 2  # preflight abort — pipeline failure, not a quality verdict
+    return 1 if state.get("overall_health") == "red" else 0
+
+
+def _resolve_interrupts(app, config, result: dict, args, output_dir: Path) -> dict:
+    """Handle human-gate interrupts until the graph completes.
+
+    The report is saved BEFORE prompting so the human can inspect it while
+    deciding. Headless runs without --approve/--reject exit here with the
+    health verdict (the gate must not be masked by the pause) and print the
+    exact resume command.
+    """
+    while result.get("__interrupt__"):
+        save_report(result, output_dir)
+        payload = result["__interrupt__"][0].value
+        console.print(Panel(
+            f"[bold]{payload.get('question', 'Approval required')}[/bold]\n"
+            f"{payload.get('error_count', 0)} error finding(s) in "
+            f"{len(payload.get('files', []))} file(s):\n"
+            + "\n".join(f"  - {f}" for f in payload.get("files", []))
+            + f"\n\nReport saved to: {output_dir}",
+            title="Human Gate",
+        ))
+        if args.approve or args.reject:
+            approved = args.approve
+        elif sys.stdin.isatty():
+            answer = console.input("[bold]Apply auto-fix? [y/N][/bold] ")
+            approved = answer.strip().lower() in ("y", "yes")
+        else:
+            console.print(
+                "[yellow]Paused at the human gate (headless). "
+                "Resume with:[/yellow]\n"
+                f"  python game_agent_pipeline.py --project {args.project} "
+                "--resume --approve   # or --reject"
+            )
+            sys.exit(_health_exit_code(result))
+        result = app.invoke(Command(resume=approved), config)
+    return result
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Harvester Game Agent Pipeline")
     parser.add_argument("--project", default="../godot-2d-space-game/project",
@@ -1038,40 +1209,74 @@ def main() -> None:
                         help="Output directory (default: reports/<timestamp>/)")
     parser.add_argument("--print-graph", action="store_true",
                         help="Print Mermaid graph diagram and exit")
+    parser.add_argument("--auto-fix", action="store_true",
+                        help="Append human_gate + auto_fix nodes (pauses for approval)")
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume from the last checkpoint instead of starting fresh")
+    parser.add_argument("--approve", action="store_true",
+                        help="With --resume (or at the pause): approve auto-fix")
+    parser.add_argument("--reject", action="store_true",
+                        help="With --resume (or at the pause): reject auto-fix")
     args = parser.parse_args()
 
-    app = build_graph()
-
     if args.print_graph:
-        print(app.get_graph().draw_mermaid())
+        print(build_graph(with_auto_fix=args.auto_fix).get_graph().draw_mermaid())
         return
 
     if not Path(args.project).exists():
         console.print(f"[red]Project path not found: {args.project}[/red]")
         sys.exit(2)
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = Path(args.output) if args.output else Path("reports") / timestamp
+    checkpointer = _make_checkpointer()
+    app = build_graph(checkpointer=checkpointer, with_auto_fix=args.auto_fix)
+    config = {"configurable": {"thread_id": _thread_id_for(args.project)}}
 
-    console.print(Panel(
-        f"[bold]Harvester Game Agent Pipeline[/bold]\n"
-        f"Project: {args.project}\n"
-        f"Display: {'disabled' if args.no_display else 'enabled'}\n"
-        f"Output:  {output_dir}",
-        title="Starting",
-    ))
+    if args.resume:
+        snapshot = app.get_state(config)
+        if not snapshot.values:
+            console.print("[red]No checkpoint for this project — nothing to resume.[/red]")
+            sys.exit(2)
+        output_dir = Path(snapshot.values.get("output_dir") or
+                          args.output or "reports/resumed")
+        interrupts = [i for task in snapshot.tasks for i in task.interrupts]
+        if interrupts:
+            # Paused at the human gate: answer it.
+            result = _resolve_interrupts(
+                app, config, {"__interrupt__": interrupts, **snapshot.values},
+                args, output_dir,
+            )
+        elif snapshot.next:
+            console.print(f"[cyan]Resuming from checkpoint — next: {list(snapshot.next)}[/cyan]")
+            result = app.invoke(None, config)
+        else:
+            console.print("[yellow]Checkpoint is already complete — nothing to resume.[/yellow]")
+            sys.exit(_health_exit_code(snapshot.values))
+    else:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_dir = Path(args.output) if args.output else Path("reports") / timestamp
 
-    final_state = app.invoke(_default_state(args.project, args.no_display))
+        console.print(Panel(
+            f"[bold]Harvester Game Agent Pipeline[/bold]\n"
+            f"Project: {args.project}\n"
+            f"Display: {'disabled' if args.no_display else 'enabled'}\n"
+            f"Output:  {output_dir}",
+            title="Starting",
+        ))
 
-    health = final_state.get("overall_health", "unknown")
+        result = app.invoke(
+            _default_state(args.project, args.no_display, str(output_dir)),
+            config,
+        )
+        result = _resolve_interrupts(app, config, result, args, output_dir)
+
+    health = result.get("overall_health", "unknown")
     color = {"green": "green", "yellow": "yellow", "red": "red"}.get(health, "white")
     console.print(f"\n[bold {color}]Overall health: {health.upper()}[/bold {color}]")
+    if result.get("fix_summary"):
+        console.print(f"[bold]Auto-fix: {result['fix_summary']}[/bold]")
 
-    save_report(final_state, output_dir)
-
-    if final_state.get("abort"):
-        sys.exit(2)  # preflight abort — pipeline failure, not a quality verdict
-    sys.exit(1 if health == "red" else 0)
+    save_report(result, output_dir)
+    sys.exit(_health_exit_code(result))
 
 
 if __name__ == "__main__":

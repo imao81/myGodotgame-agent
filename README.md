@@ -437,11 +437,18 @@ is computed online, and the bandit persists across runs
 which pushes easy work toward cheaper tiers over time; files where findings
 hold up under verification reward the stronger models that found them.
 
-- **Arms** are resolved from available API keys: Kimi highspeed / standard /
-  K3 tiers, plus Claude Sonnet when `ANTHROPIC_API_KEY` is set. Single-key
-  setups degrade to "everything on the default model".
+- **Arms** are resolved from available API keys: DeepSeek V4 Flash / V4 Pro,
+  Kimi highspeed / standard / K3, plus Claude Sonnet when `ANTHROPIC_API_KEY`
+  is set. Preflight pings every configured provider; one with a bad key is
+  excluded from routing and the escalation ladder for that run (its learned
+  bandit state is kept — a fixed key should not wipe history).
 - **Escalation**: if a cheap tier's API call fails, the per-file retry ladder
-  climbs to the next tier instead of retrying the same one.
+  climbs to the next tier instead of retrying the same one. Auth errors (401)
+  skip the backoff entirely — a bad key never heals by waiting.
+- **Failures feed back**: a file that exhausts its ladder still updates the
+  bandit — with a negative reward for every arm that failed. Without this, a
+  broken premium arm stays "cold" forever and keeps attracting UCB traffic
+  (learned the hard way: one run routed 62/62 files to a dead-key arm).
 - **A/B**: `--no-router` pins all files to the default model as a baseline;
   `ROUTER_ARMS` whitelists tiers; `ROUTER_LAMBDA` tunes cost sensitivity.
 - Learning compounds: each run's arm distribution, per-arm mean reward, and
@@ -496,6 +503,9 @@ harvester-agent/
 | `LLM_FALLBACK` | Enable fallback provider | `0` |
 | `ANTHROPIC_API_KEY` | Claude API key | - |
 | `MOONSHOT_API_KEY` | Kimi API key | - |
+| `DEEPSEEK_API_KEY` | DeepSeek API key (enables v4-flash / v4-pro router arms) | - |
+| `DEEPSEEK_TEXT_MODEL` | DeepSeek pro-tier model | `deepseek-v4-pro` |
+| `DEEPSEEK_FLASH_MODEL` | DeepSeek flash-tier model | `deepseek-v4-flash` |
 | `KIMI_TEXT_MODEL` | Kimi model for code review | `kimi-k2.7-code` |
 | `KIMI_VISION_MODEL` | Kimi model for screenshots | `moonshot-v1-8k-vision-preview` |
 

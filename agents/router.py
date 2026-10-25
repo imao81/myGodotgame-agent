@@ -40,9 +40,15 @@ import numpy as np
 # Override the set with ROUTER_ARMS="kimi-highspeed,claude-sonnet".
 
 _ARM_TABLE: list[dict] = [
+    {"name": "deepseek-flash", "provider": "deepseek",
+     "model": os.environ.get("DEEPSEEK_FLASH_MODEL", "deepseek-v4-flash"),
+     "rel_cost": 0.7, "requires_key": "DEEPSEEK_API_KEY"},
     {"name": "kimi-highspeed", "provider": "kimi",
      "model": "kimi-k2.7-code-highspeed", "rel_cost": 1.0,
      "requires_key": "MOONSHOT_API_KEY"},
+    {"name": "deepseek-pro", "provider": "deepseek",
+     "model": os.environ.get("DEEPSEEK_TEXT_MODEL", "deepseek-v4-pro"),
+     "rel_cost": 1.5, "requires_key": "DEEPSEEK_API_KEY"},
     {"name": "kimi-standard", "provider": "kimi",
      "model": "kimi-k2.7-code", "rel_cost": 2.0,
      "requires_key": "MOONSHOT_API_KEY"},
@@ -155,10 +161,17 @@ class LinUCB:
         theta = a_inv @ self._b[arm]
         return float(theta @ x + self.alpha * math.sqrt(x @ a_inv @ x))
 
-    def select(self, contexts: dict[str, np.ndarray]) -> dict[str, str]:
-        """Assign each file an arm. Un-pulled arms get cold-start priority."""
+    def select(self, contexts: dict[str, np.ndarray],
+               allowed: list[str] | None = None) -> dict[str, str]:
+        """Assign each file an arm. Un-pulled arms get cold-start priority.
+
+        allowed restricts the eligible arms (e.g. excluding providers whose
+        keys failed preflight) without discarding the excluded arms' learned
+        state.
+        """
+        names = [a for a in (allowed or self.arm_names) if a in self._A]
         plan: dict[str, str] = {}
-        cold = [a for a in self.arm_names if self.pulls[a] == 0]
+        cold = [a for a in names if self.pulls[a] == 0]
         cold_i = 0
         for fname in sorted(contexts):
             if cold:
@@ -168,7 +181,7 @@ class LinUCB:
                     cold = []
             else:
                 x = contexts[fname]
-                plan[fname] = max(self.arm_names, key=lambda a: self._ucb(a, x))
+                plan[fname] = max(names, key=lambda a: self._ucb(a, x))
         return plan
 
     # ── learning ───────────────────────────────────────────────────────────

@@ -139,6 +139,20 @@ class TestArms(unittest.TestCase):
             names = [a["name"] for a in available_arms()]
         self.assertEqual(names, ["kimi-highspeed", "kimi-standard", "kimi-k3"])
 
+    def test_deepseek_key_adds_two_arms(self):
+        with mock.patch.dict(os.environ, {"DEEPSEEK_API_KEY": "d"}, clear=True):
+            names = [a["name"] for a in available_arms()]
+        self.assertEqual(names, ["deepseek-flash", "deepseek-pro"])
+
+    def test_deepseek_resolves_as_provider(self):
+        from agents.llm_client import _resolve_provider
+        with mock.patch.dict(os.environ, {"DEEPSEEK_API_KEY": "d"}, clear=True):
+            self.assertEqual(_resolve_provider(), "deepseek")
+        with mock.patch.dict(os.environ,
+                             {"LLM_PROVIDER": "DeepSeek",
+                              "MOONSHOT_API_KEY": "k"}, clear=True):
+            self.assertEqual(_resolve_provider(), "deepseek")
+
     def test_both_providers_give_four_arms(self):
         with mock.patch.dict(os.environ,
                              {"MOONSHOT_API_KEY": "k", "ANTHROPIC_API_KEY": "c"},
@@ -252,7 +266,7 @@ class TestEscalation(unittest.TestCase):
             gd.write_text("extends Node\n", encoding="utf-8")
             with mock.patch("review.review_file", side_effect=fake_review_file), \
                  mock.patch.object(gap.time, "sleep"):
-                findings, err, usage, arm_used, escalated = (
+                findings, err, usage, arm_used, escalated, failed_arms = (
                     gap._review_one_file_with_retry(
                         gd, Path(td), {}, mock.Mock(),
                         provider_for=provider_for,
@@ -264,6 +278,7 @@ class TestEscalation(unittest.TestCase):
         self.assertEqual(arm_used, "kimi-standard")
         self.assertTrue(escalated)
         self.assertEqual(len(calls), 2)
+        self.assertEqual(failed_arms, ["kimi-highspeed"])
 
     def test_no_ladder_keeps_single_provider(self):
         provider = mock.Mock()
@@ -272,12 +287,59 @@ class TestEscalation(unittest.TestCase):
             gd = Path(td) / "a.gd"
             gd.write_text("extends Node\n", encoding="utf-8")
             with mock.patch("review.review_file", return_value=([], None)):
-                findings, err, usage, arm_used, escalated = (
+                findings, err, usage, arm_used, escalated, failed_arms = (
                     gap._review_one_file_with_retry(gd, Path(td), {}, provider)
                 )
         self.assertIsNone(err)
         self.assertIsNone(arm_used)
         self.assertFalse(escalated)
+        self.assertEqual(failed_arms, [])
+
+    def test_auth_error_escalates_immediately_without_sleep(self):
+        def provider_for(arm):
+            p = mock.Mock()
+            p.last_usage = None
+            return p
+
+        def always_auth(*args, **kwargs):
+            return [], "LLM call failed: Error code: 401 - authentication_error"
+
+        with tempfile.TemporaryDirectory() as td:
+            gd = Path(td) / "a.gd"
+            gd.write_text("extends Node\n", encoding="utf-8")
+            with mock.patch("review.review_file", side_effect=always_auth), \
+                 mock.patch.object(gap.time, "sleep") as mock_sleep:
+                findings, err, usage, arm_used, escalated, failed_arms = (
+                    gap._review_one_file_with_retry(
+                        gd, Path(td), {}, mock.Mock(),
+                        provider_for=provider_for,
+                        arm_ladder=["k1", "k2", "k3"],
+                    )
+                )
+        self.assertIsNotNone(err)
+        self.assertEqual(findings, [])
+        # all three tiers tried, zero backoff sleeps (auth never heals)
+        self.assertEqual(failed_arms, ["k1", "k2", "k3"])
+        mock_sleep.assert_not_called()
+
+    def test_auth_error_without_ladder_fails_fast(self):
+        provider = mock.Mock()
+        provider.last_usage = None
+        calls = []
+
+        def always_auth(*args, **kwargs):
+            calls.append(1)
+            return [], "401 unauthorized"
+
+        with tempfile.TemporaryDirectory() as td:
+            gd = Path(td) / "a.gd"
+            gd.write_text("extends Node\n", encoding="utf-8")
+            with mock.patch("review.review_file", side_effect=always_auth), \
+                 mock.patch.object(gap.time, "sleep"):
+                _, err, *_ = gap._review_one_file_with_retry(
+                    gd, Path(td), {}, provider)
+        self.assertIsNotNone(err)
+        self.assertEqual(len(calls), 1)  # one shot, no pointless retries
 
 
 # ── code_review_node integration (mocked LLM) ─────────────────────────────────
@@ -332,6 +394,70 @@ class TestCodeReviewRouting(unittest.TestCase):
             self.assertEqual(saved["pulls"]["kimi-standard"], 1)
             # reward = +1 confirmed − 0.05 × 1.2k tok × rel_cost 2.0 = 0.88
             self.assertAlmostEqual(stats["total_reward"]["kimi-standard"], 0.88)
+
+    def test_failed_file_poisons_assigned_arm(self):
+        """A skipped file must still update the bandit — negatively."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            gd = root / "a.gd"
+            gd.write_text("extends Node\n", encoding="utf-8")
+            router_dir = root / "router"
+
+            fake_memory = mock.Mock()
+            fake_memory.retrieve.return_value = []
+            fake_memory.curate.return_value = {"added": 0, "updated": 0,
+                                               "total": 0}
+
+            state = {
+                **gap._default_state(str(root), True),
+                "routing_plan": {
+                    "a.gd": {"arm": "claude-sonnet", "provider": "claude",
+                             "model": "claude-sonnet-4-6", "rel_cost": 8.0,
+                             "context": [1.0] * 9},
+                },
+                "routing_stats": {},
+            }
+
+            def always_auth(*args, **kwargs):
+                return [], "LLM call failed: Error code: 401 - invalid x-api-key"
+
+            with mock.patch.dict(os.environ,
+                                 {"MOONSHOT_API_KEY": "k",
+                                  "ANTHROPIC_API_KEY": "bad"}, clear=True), \
+                 mock.patch.object(gap, "_ROUTER_DIR", router_dir), \
+                 mock.patch.object(gap, "_discover_review_files",
+                                   return_value=[gd]), \
+                 mock.patch("review.review_file", side_effect=always_auth), \
+                 mock.patch("agents.review_memory.ReviewMemory",
+                            return_value=fake_memory), \
+                 mock.patch("agents.llm_client.LLMClient"), \
+                 mock.patch.object(gap.time, "sleep"):
+                result = gap.code_review_node(state)
+
+            self.assertEqual(result["skipped_files"], ["a.gd"])
+            stats = result["routing_stats"]
+            self.assertEqual(stats["poisoned_arms"], {"claude-sonnet": 1})
+            saved = json.loads((router_dir / "linucb.json").read_text())
+            self.assertEqual(saved["pulls"]["claude-sonnet"], 1)
+            self.assertLess(saved["total_reward"]["claude-sonnet"], 0.0)
+
+
+class TestRouteFilesBrokenProvider(unittest.TestCase):
+
+    def test_broken_provider_excluded_from_plan(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "a.gd").write_text("extends Node\n", encoding="utf-8")
+            (root / "b.gd").write_text("extends Node\n", encoding="utf-8")
+            state = {**gap._default_state(str(root), True),
+                     "broken_providers": ["claude"]}
+            with mock.patch.dict(os.environ,
+                                 {"MOONSHOT_API_KEY": "k",
+                                  "ANTHROPIC_API_KEY": "bad"}, clear=True):
+                result = gap.route_files_node(state)
+        self.assertTrue(result["routing_plan"])
+        for entry in result["routing_plan"].values():
+            self.assertEqual(entry["provider"], "kimi")
 
 
 if __name__ == "__main__":

@@ -66,6 +66,13 @@ _CLAUDE_VISION_MODEL = "claude-sonnet-4-6"
 # Model names change over time — env vars override the defaults
 _KIMI_TEXT_MODEL = os.environ.get("KIMI_TEXT_MODEL", "kimi-k2.7-code")
 _KIMI_VISION_MODEL = os.environ.get("KIMI_VISION_MODEL", "moonshot-v1-8k-vision-preview")
+_DEEPSEEK_TEXT_MODEL = os.environ.get("DEEPSEEK_TEXT_MODEL", "deepseek-v4-pro")
+
+# OpenAI-compatible provider endpoints
+_OPENAI_COMPAT = {
+    "kimi": ("MOONSHOT_API_KEY", "https://api.moonshot.cn/v1"),
+    "deepseek": ("DEEPSEEK_API_KEY", "https://api.deepseek.com"),
+}
 
 
 # ── Provider resolution ────────────────────────────────────────────────────────
@@ -74,18 +81,24 @@ _KIMI_VISION_MODEL = os.environ.get("KIMI_VISION_MODEL", "moonshot-v1-8k-vision-
 def _resolve_provider() -> str:
     """Pick a provider based on LLM_PROVIDER env var or available API keys."""
     explicit = os.environ.get("LLM_PROVIDER", "").lower().strip()
-    if explicit in ("claude", "kimi"):
+    if explicit in ("claude", "kimi", "deepseek"):
         return explicit
     # Auto-detect: Claude takes priority when both keys are present
     if os.environ.get("ANTHROPIC_API_KEY"):
         return "claude"
     if os.environ.get("MOONSHOT_API_KEY"):
         return "kimi"
+    if os.environ.get("DEEPSEEK_API_KEY"):
+        return "deepseek"
     return "claude"  # Will fail with a clear auth error at call time
 
 
-def _other_provider(provider: str) -> str:
-    return "kimi" if provider == "claude" else "claude"
+def _fallback_candidates(provider: str) -> list[str]:
+    """Other providers with a configured key, in preference order."""
+    order = ["claude", "kimi", "deepseek"]
+    key_of = {"claude": "ANTHROPIC_API_KEY", "kimi": "MOONSHOT_API_KEY",
+              "deepseek": "DEEPSEEK_API_KEY"}
+    return [p for p in order if p != provider and os.environ.get(key_of[p])]
 
 
 # ── LLMClient ─────────────────────────────────────────────────────────────────
@@ -116,11 +129,12 @@ class LLMClient:
         self.enable_fallback = (
             enable_fallback or os.environ.get("LLM_FALLBACK", "").strip() == "1"
         )
-        # Kimi client is created eagerly when provider=kimi, lazily on first
-        # fallback use when provider=claude. See _get_kimi_client().
+        # OpenAI-compatible clients are created eagerly when selected, lazily
+        # on first fallback use. Kimi: see _get_kimi_client().
         self._kimi_client = None
-        if self.provider == "kimi":
-            self._get_kimi_client()  # validate key + create client at construction
+        self._deepseek_client = None
+        if self.provider in ("kimi", "deepseek"):
+            self._get_compat_client(self.provider)  # validate key at construction
 
     # ── Internal: Claude ───────────────────────────────────────────────────────
 
@@ -179,26 +193,32 @@ class LLMClient:
 
     # ── Internal: Kimi (OpenAI-compatible) ────────────────────────────────────
 
-    def _get_kimi_client(self):
-        """Return the cached Kimi client, creating it lazily if needed (e.g. fallback)."""
-        if self._kimi_client is None:
-            api_key = os.environ.get("MOONSHOT_API_KEY")
+    def _get_compat_client(self, provider: str):
+        """Return the cached OpenAI-compatible client, creating it lazily."""
+        env_var, base_url = _OPENAI_COMPAT[provider]
+        attr = f"_{provider}_client"
+        client = getattr(self, attr)
+        if client is None:
+            api_key = os.environ.get(env_var)
             if not api_key:
                 raise RuntimeError(
-                    "MOONSHOT_API_KEY is not set. "
-                    "Set it or switch to LLM_PROVIDER=claude."
+                    f"{env_var} is not set. "
+                    f"Set it or switch LLM_PROVIDER to another provider."
                 )
             from openai import OpenAI
 
-            self._kimi_client = OpenAI(
-                api_key=api_key,
-                base_url="https://api.moonshot.cn/v1",
-            )
-        return self._kimi_client
+            client = OpenAI(api_key=api_key, base_url=base_url)
+            setattr(self, attr, client)
+        return client
 
-    def _chat_kimi(self, messages: list[ChatCompletionMessageParam], max_tokens: int) -> str:
-        response = self._get_kimi_client().chat.completions.create(
-            model=self._model or _KIMI_TEXT_MODEL,
+    def _get_kimi_client(self):
+        """Return the cached Kimi client (kept for backward compatibility)."""
+        return self._get_compat_client("kimi")
+
+    def _chat_compat(self, provider: str, default_model: str,
+                     messages: list[ChatCompletionMessageParam], max_tokens: int) -> str:
+        response = self._get_compat_client(provider).chat.completions.create(
+            model=self._model or default_model,
             max_tokens=max_tokens,
             messages=messages,
         )
@@ -208,6 +228,12 @@ class LLMClient:
             if u else None
         )
         return response.choices[0].message.content or ""
+
+    def _chat_kimi(self, messages: list[ChatCompletionMessageParam], max_tokens: int) -> str:
+        return self._chat_compat("kimi", _KIMI_TEXT_MODEL, messages, max_tokens)
+
+    def _chat_deepseek(self, messages: list[ChatCompletionMessageParam], max_tokens: int) -> str:
+        return self._chat_compat("deepseek", _DEEPSEEK_TEXT_MODEL, messages, max_tokens)
 
     def _vision_kimi(
         self, image_b64: str, media_type: str, prompt: str, max_tokens: int
@@ -241,18 +267,23 @@ class LLMClient:
 
     def chat(self, messages: list[ChatCompletionMessageParam], max_tokens: int = 1024) -> str:
         """Send a text chat and return the response as a string."""
-        dispatch = {"claude": self._chat_claude, "kimi": self._chat_kimi}
+        dispatch = {"claude": self._chat_claude, "kimi": self._chat_kimi,
+                    "deepseek": self._chat_deepseek}
         if self.provider not in dispatch:
             raise ValueError(
-                f"Unknown LLM provider: {self.provider!r}. Use 'claude' or 'kimi'."
+                f"Unknown LLM provider: {self.provider!r}. "
+                f"Use one of: {sorted(dispatch)}."
             )
         try:
             return dispatch[self.provider](messages, max_tokens)
         except Exception:
             if self.enable_fallback:
-                fallback = _other_provider(self.provider)
-                if fallback in dispatch:
-                    return dispatch[fallback](messages, max_tokens)
+                for candidate in _fallback_candidates(self.provider):
+                    if candidate in dispatch:
+                        try:
+                            return dispatch[candidate](messages, max_tokens)
+                        except Exception:
+                            continue
             self.last_usage = None
             raise
 
@@ -267,15 +298,20 @@ class LLMClient:
         dispatch = {"claude": self._vision_claude, "kimi": self._vision_kimi}
         if self.provider not in dispatch:
             raise ValueError(
-                f"Unknown LLM provider: {self.provider!r}. Use 'claude' or 'kimi'."
+                f"Provider {self.provider!r} has no vision route configured "
+                f"(supported: {sorted(dispatch)})."
             )
         try:
             return dispatch[self.provider](image_b64, media_type, prompt, max_tokens)
         except Exception:
             if self.enable_fallback:
-                fallback = _other_provider(self.provider)
-                if fallback in dispatch:
-                    return dispatch[fallback](image_b64, media_type, prompt, max_tokens)
+                for candidate in _fallback_candidates(self.provider):
+                    if candidate in dispatch:
+                        try:
+                            return dispatch[candidate](image_b64, media_type,
+                                                       prompt, max_tokens)
+                        except Exception:
+                            continue
             raise
 
     def __repr__(self) -> str:

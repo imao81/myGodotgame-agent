@@ -106,6 +106,7 @@ class GameReport(TypedDict):
     abort: bool
     fallback_mode: Optional[str]          # "static_only" | None
     degradation_reason: Optional[str]     # human-readable reason for fallback, if any
+    broken_providers: list[str]           # providers whose keys failed preflight ping
     scope: list[str]                      # project-relative paths (empty = full project)
 
     # Index — path only; full dict lives on disk
@@ -169,6 +170,7 @@ def _default_state(project_path: str, no_display: bool, output_dir: str = "",
         abort=False,
         fallback_mode=None,
         degradation_reason=None,
+        broken_providers=[],
         scope=[],
         index_path="",
         anchor_path=None,
@@ -306,50 +308,18 @@ _PROVIDER_KEY_MAP: dict[str, Optional[str]] = {
     "claude": "ANTHROPIC_API_KEY",
     "moonshot": "MOONSHOT_API_KEY",
     "kimi": "MOONSHOT_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
     "openai": "OPENAI_API_KEY",
     "local": None,
 }
 
 
-def _check_api_key() -> tuple[Optional[str], Optional[str]]:
-    """Ping the configured LLM provider.
+def _ping_provider(provider: str, api_key: str) -> Optional[str]:
+    """One-token connectivity check. Returns an error string, or None if OK.
 
-    Returns (fallback_mode, degradation_reason):
-      - ("static_only", "<reason>") when LLM calls must be skipped
-      - (None, None) when the provider is ready
+    Uses the model the pipeline will actually route to, so a wrong model name
+    fails here instead of producing per-file 404s downstream.
     """
-    provider = os.environ.get("LLM_PROVIDER", "").lower().strip()
-
-    # Mirror llm_client._resolve_provider auto-detection logic
-    if not provider:
-        if os.environ.get("ANTHROPIC_API_KEY"):
-            provider = "anthropic"
-        elif os.environ.get("MOONSHOT_API_KEY"):
-            provider = "kimi"
-        else:
-            provider = "anthropic"  # Will produce a clear auth error below
-
-    if provider not in _PROVIDER_KEY_MAP:
-        reason = f"Unknown LLM_PROVIDER={provider!r}"
-        console.log(f"[yellow]  {reason} → static-only mode[/yellow]")
-        return "static_only", reason
-
-    env_var = _PROVIDER_KEY_MAP[provider]
-
-    # Local providers need no API key
-    if env_var is None:
-        console.log(f"[dim]  Provider '{provider}' (local) — skipping API key check ✓[/dim]")
-        return None, None
-
-    api_key = os.environ.get(env_var, "")
-    if not api_key:
-        reason = f"{env_var} not configured (provider: {provider})"
-        console.log(f"[yellow]  {reason} → static-only mode[/yellow]")
-        return "static_only", reason
-
-    # Lightweight connectivity test — one minimal request against the model the
-    # pipeline will actually use, so a wrong/unavailable model name fails here
-    # instead of producing 60+ per-file 404s downstream.
     try:
         if provider in ("anthropic", "claude"):
             import anthropic
@@ -367,6 +337,14 @@ def _check_api_key() -> tuple[Optional[str], Optional[str]]:
                 max_tokens=1,
                 messages=[{"role": "user", "content": "ping"}],
             )
+        elif provider == "deepseek":
+            from openai import OpenAI
+            from agents.llm_client import _DEEPSEEK_TEXT_MODEL
+            OpenAI(api_key=api_key, base_url="https://api.deepseek.com").chat.completions.create(
+                model=_DEEPSEEK_TEXT_MODEL,
+                max_tokens=1,
+                messages=[{"role": "user", "content": "ping"}],
+            )
         elif provider == "openai":
             from openai import OpenAI
             OpenAI(api_key=api_key).chat.completions.create(
@@ -374,32 +352,103 @@ def _check_api_key() -> tuple[Optional[str], Optional[str]]:
                 max_tokens=1,
                 messages=[{"role": "user", "content": "ping"}],
             )
-        console.log(f"[dim]  {env_var} valid ({provider}) ✓[/dim]")
-        return None, None
+        return None
     except Exception as e:
-        msg = str(e).lower()
-        if ("401" in msg or "authentication" in msg or "invalid" in msg
-                or "unauthorized" in msg):
-            reason = f"{env_var} rejected by {provider} API: {e}"
-            console.log(f"[yellow]  {reason} → static-only mode[/yellow]")
-            return "static_only", reason
-        if "404" in msg or "resource_not_found" in msg or "not found the model" in msg:
-            reason = f"Configured model not available on {provider} account: {e}"
-            console.log(f"[yellow]  {reason} → static-only mode[/yellow]")
-            return "static_only", reason
-        # Transient error (rate-limit, network) — warn but let agents retry
-        console.log(f"[yellow]  API ping inconclusive (transient?): {e}[/yellow]")
-        return None, None
+        return str(e)
+
+
+def _is_permanent_ping_failure(msg: str) -> bool:
+    """Auth/unknown-model errors won't heal within a run; transient ones might."""
+    m = msg.lower()
+    return ("401" in m or "authentication" in m or "invalid" in m
+            or "unauthorized" in m or "404" in m
+            or "resource_not_found" in m or "not found the model" in m)
+
+
+def _check_api_key() -> tuple[Optional[str], Optional[str], str]:
+    """Ping the configured LLM provider.
+
+    Returns (fallback_mode, degradation_reason, provider):
+      - ("static_only", "<reason>", provider) when LLM calls must be skipped
+      - (None, None, provider) when the provider is ready
+    """
+    provider = os.environ.get("LLM_PROVIDER", "").lower().strip()
+
+    # Mirror llm_client._resolve_provider auto-detection logic
+    if not provider:
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            provider = "anthropic"
+        elif os.environ.get("MOONSHOT_API_KEY"):
+            provider = "kimi"
+        else:
+            provider = "anthropic"  # Will produce a clear auth error below
+
+    if provider not in _PROVIDER_KEY_MAP:
+        reason = f"Unknown LLM_PROVIDER={provider!r}"
+        console.log(f"[yellow]  {reason} → static-only mode[/yellow]")
+        return "static_only", reason, provider
+
+    env_var = _PROVIDER_KEY_MAP[provider]
+
+    # Local providers need no API key
+    if env_var is None:
+        console.log(f"[dim]  Provider '{provider}' (local) — skipping API key check ✓[/dim]")
+        return None, None, provider
+
+    api_key = os.environ.get(env_var, "")
+    if not api_key:
+        reason = f"{env_var} not configured (provider: {provider})"
+        console.log(f"[yellow]  {reason} → static-only mode[/yellow]")
+        return "static_only", reason, provider
+
+    err = _ping_provider(provider, api_key)
+    if err is None:
+        console.log(f"[dim]  {env_var} valid ({provider}) ✓[/dim]")
+        return None, None, provider
+    if _is_permanent_ping_failure(err):
+        reason = f"{env_var} rejected by {provider} API: {err}"
+        console.log(f"[yellow]  {reason} → static-only mode[/yellow]")
+        return "static_only", reason, provider
+    # Transient error (rate-limit, network) — warn but let agents retry
+    console.log(f"[yellow]  API ping inconclusive (transient?): {err}[/yellow]")
+    return None, None, provider
 
 
 def preflight_check_node(state: GameReport) -> dict:
-    """Validate API key (single ping), Godot CLI binary, and project.godot."""
+    """Validate API keys, Godot CLI binary, and project.godot.
+
+    The primary provider decides full vs static-only mode. Additionally, every
+    OTHER configured provider key gets a one-token ping: the router can only
+    use arms whose provider actually works, so broken secondary providers are
+    excluded up front instead of failing per-file deep into the run.
+    """
     t0 = time.perf_counter()
     console.log("[bold cyan]▶ Preflight Check[/bold cyan]")
 
     project_path = Path(state["project_path"])
     hard_failures = _check_static_prerequisites(project_path)
-    fallback_mode, degradation_reason = _check_api_key()
+    fallback_mode, degradation_reason, primary = _check_api_key()
+
+    # Secondary providers (router arms): ping only when the primary is usable
+    broken_providers: list[str] = []
+    if fallback_mode is None:
+        for pname, env_var in (("claude", "ANTHROPIC_API_KEY"),
+                               ("kimi", "MOONSHOT_API_KEY"),
+                               ("deepseek", "DEEPSEEK_API_KEY")):
+            key = os.environ.get(env_var, "")
+            if not key or pname == primary or (pname == "claude" and primary == "anthropic"):
+                continue
+            err = _ping_provider(pname, key)
+            if err is None:
+                console.log(f"[dim]  {env_var} valid ({pname}, router arm) ✓[/dim]")
+            elif _is_permanent_ping_failure(err):
+                broken_providers.append(pname)
+                console.log(
+                    f"[yellow]  {env_var} rejected — excluding {pname} "
+                    f"router arms: {err[:120]}[/yellow]"
+                )
+            else:
+                console.log(f"[yellow]  {pname} ping inconclusive (transient?)[/yellow]")
 
     abort = bool(hard_failures)
     for f in hard_failures:
@@ -413,6 +462,7 @@ def preflight_check_node(state: GameReport) -> dict:
         "abort": abort,
         "fallback_mode": fallback_mode,
         "degradation_reason": degradation_reason,
+        "broken_providers": broken_providers,
         "agent_status": {
             "preflight_check": "abort" if abort else f"ok:{fallback_mode or 'full'}",
         },
@@ -522,7 +572,11 @@ def route_files_node(state: GameReport) -> dict:
         return _skip("disabled")
 
     from agents.router import LinUCB, available_arms, file_features
-    arms = available_arms()
+    broken = set(state.get("broken_providers", []))
+    all_arms = available_arms()
+    arms = [a for a in all_arms if a["provider"] not in broken]
+    if broken:
+        console.log(f"[dim]  Excluding broken provider(s): {sorted(broken)}[/dim]")
     if len(arms) <= 1:
         return _skip("single_arm" if arms else "no_arms")
 
@@ -544,8 +598,8 @@ def route_files_node(state: GameReport) -> dict:
             n_lines = 0
         contexts[rel] = file_features(rel, index, n_lines).tolist()
 
-    bandit = LinUCB.load(_ROUTER_DIR / "linucb.json", [a["name"] for a in arms])
-    assignment = bandit.select(contexts)
+    bandit = LinUCB.load(_ROUTER_DIR / "linucb.json", [a["name"] for a in all_arms])
+    assignment = bandit.select(contexts, allowed=[a["name"] for a in arms])
     arm_by_name = {a["name"]: a for a in arms}
     plan = {
         rel: {"arm": arm_name,
@@ -652,6 +706,12 @@ def _code_review_static_fallback(state: GameReport) -> dict:
     }
 
 
+def _is_auth_error(err: str) -> bool:
+    """Auth failures are permanent — retrying the same key is pointless."""
+    e = err.lower()
+    return "401" in e or "authentication" in e or "invalid x-api-key" in e
+
+
 def _review_one_file_with_retry(
     gd: Path,
     project_path: Path,
@@ -660,18 +720,24 @@ def _review_one_file_with_retry(
     memory_hints: list[dict] | None = None,
     provider_for=None,
     arm_ladder: list[str] | None = None,
-) -> tuple[list[dict], str | None, dict | None, str | None, bool]:
+) -> tuple[list[dict], str | None, dict | None, str | None, bool, list[str]]:
     """Review one file with up to 3 attempts and exponential backoff.
 
-    Returns (findings, error, usage, arm_used, escalated).
+    Returns (findings, error, usage, arm_used, escalated, failed_arms).
     When arm_ladder is given, attempt N escalates to ladder[min(N, len-1)] —
     a cheap model that fails its API call retried on a stronger tier.
+    Auth errors fail fast: no backoff sleep, straight to the next tier (or
+    give up when the ladder is exhausted) — a bad key never heals by waiting.
+    failed_arms records every arm that produced an error so the bandit can
+    penalise them; a broken arm that is never updated stays "cold" forever
+    and keeps attracting UCB traffic.
     """
     from review import review_file
     last_err: str | None = None
     rel = gd.relative_to(project_path).as_posix()
     arm_used: str | None = None
     escalated = False
+    failed_arms: list[str] = []
 
     for attempt in range(3):
         p = provider
@@ -685,26 +751,42 @@ def _review_one_file_with_retry(
                                              memory_hints=memory_hints)
             if err:
                 last_err = err
-                if attempt < 2:
+                if arm_used:
+                    failed_arms.append(arm_used)
+                auth = _is_auth_error(err)
+                if attempt < 2 and (not auth or (arm_ladder and attempt + 1 < len(arm_ladder))):
+                    if auth:
+                        console.log(
+                            f"[yellow]  {rel}: auth error on {arm_used or 'default'} — "
+                            f"escalating immediately[/yellow]"
+                        )
+                    else:
+                        wait = 2 ** attempt
+                        console.log(
+                            f"[yellow]  {rel}: attempt {attempt + 1}/3 failed "
+                            f"({err}), retry in {wait}s[/yellow]"
+                        )
+                        time.sleep(wait)
+                    continue
+                break  # auth with no higher tier left, or final attempt
+            return file_findings, None, getattr(p, "last_usage", None), arm_used, escalated, failed_arms
+        except Exception as exc:
+            last_err = str(exc)
+            if arm_used:
+                failed_arms.append(arm_used)
+            auth = _is_auth_error(last_err)
+            if attempt < 2 and (not auth or (arm_ladder and attempt + 1 < len(arm_ladder))):
+                if not auth:
                     wait = 2 ** attempt
                     console.log(
-                        f"[yellow]  {rel}: attempt {attempt + 1}/3 failed "
-                        f"({err}), retry in {wait}s[/yellow]"
+                        f"[yellow]  {rel}: attempt {attempt + 1}/3 raised "
+                        f"({exc}), retry in {wait}s[/yellow]"
                     )
                     time.sleep(wait)
                 continue
-            return file_findings, None, getattr(p, "last_usage", None), arm_used, escalated
-        except Exception as exc:
-            last_err = str(exc)
-            if attempt < 2:
-                wait = 2 ** attempt
-                console.log(
-                    f"[yellow]  {rel}: attempt {attempt + 1}/3 raised "
-                    f"({exc}), retry in {wait}s[/yellow]"
-                )
-                time.sleep(wait)
+            break
 
-    return [], last_err, None, arm_used, escalated
+    return [], last_err, None, arm_used, escalated, failed_arms
 
 
 def _load_index_from_state(state: GameReport) -> dict:
@@ -752,12 +834,17 @@ def code_review_node(state: GameReport) -> dict:
     provider_cache: dict[str, "RealLLMProvider"] = {}
     run_pulls: dict[str, int] = {}
     run_rewards: dict[str, float] = {}
+    poisoned: dict[str, int] = {}
     escalations = 0
     if routing_plan:
         from agents.router import LinUCB, available_arms
         arms = available_arms()
         arm_table = {a["name"]: a for a in arms}
+        # Bandit loads the FULL arm set so learned state survives a temporarily
+        # broken provider; only the escalation ladder excludes it.
         bandit = LinUCB.load(_ROUTER_DIR / "linucb.json", list(arm_table))
+        broken = set(state.get("broken_providers", []))
+        ladder_arms = [a for a in arms if a["provider"] not in broken]
 
         def _provider_for(arm_name: str):
             if arm_name not in provider_cache:
@@ -793,15 +880,22 @@ def code_review_node(state: GameReport) -> dict:
         entry = routing_plan.get(rel)
         if entry and bandit is not None:
             from agents.router import escalation_ladder
-            ladder = escalation_ladder(list(arm_table.values()), entry["arm"])
+            ladder = escalation_ladder(ladder_arms, entry["arm"])
 
-        file_findings, err, usage, arm_used, escalated = _review_one_file_with_retry(
+        file_findings, err, usage, arm_used, escalated, failed_arms = _review_one_file_with_retry(
             gd, project_path, index, provider, memory_hints=mem_hints or None,
             provider_for=_provider_for, arm_ladder=ladder,
         )
         if err is not None:
             console.log(f"[yellow]  Skipping {rel} after 3 failures: {err}[/yellow]")
             skipped_files.append(rel)
+            # Feed failures back as negative reward — otherwise a broken arm
+            # stays cold-started forever and keeps attracting UCB traffic.
+            if entry and bandit is not None:
+                penalty = -2.0 if _is_auth_error(err) else -1.0
+                for fa in set(failed_arms):
+                    bandit.update(fa, entry["context"], penalty)
+                    poisoned[fa] = poisoned.get(fa, 0) + 1
             continue
 
         all_findings.extend(file_findings)
@@ -841,6 +935,7 @@ def code_review_node(state: GameReport) -> dict:
             "mean_reward": {a: round(run_rewards[a] / run_pulls[a], 3)
                             for a in run_pulls if run_pulls[a]},
             "escalations": escalations,
+            "poisoned_arms": poisoned,
             "bandit_pulls_after": dict(bandit.pulls),
         }
         console.log(

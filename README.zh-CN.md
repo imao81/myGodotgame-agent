@@ -1,6 +1,6 @@
 [English](README.md) | 简体中文
 
-# 一个简单的 Godot 游戏代码测试 Agent
+# Godot 游戏代码审查 Agent
 
 一个面向 Godot 4 GDScript 游戏项目的 AI 驱动代码评审与质量保障流水线。围绕 "Harvester" 太空采矿游戏的实际运行构建并测试，可迁移到其他 Godot 项目。
 

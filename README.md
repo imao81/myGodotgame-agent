@@ -1,3 +1,5 @@
+English | [简体中文](README.zh-CN.md)
+
 # A Simple Godot Game Code Test Agent
 
 An AI-powered code review and quality assurance pipeline for Godot 4 GDScript game projects. Built and test by running the "Harvester" space mining game and is adaptable to other Godot project.

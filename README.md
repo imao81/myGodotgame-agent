@@ -317,6 +317,45 @@ keyword rules, and `code_qa` returns an honest structured summary of the
 retrieved index entries instead of inventing an answer (`llm_used=False`).
 Only `full_review` requires a working key.
 
+## MCP Server
+
+`mcp_server.py` exposes the same review/Q&A capabilities to any MCP host
+(Claude Code, Cursor, Claude Desktop, …) over stdio. It is pure packaging —
+every tool is a thin wrapper over `review.run_pipeline`,
+`review.load_or_build_index` and `agents.qa_engine`; no new review logic.
+
+```jsonc
+// claude_desktop_config.json (or the host's equivalent)
+{
+  "mcpServers": {
+    "harvester-agent": {
+      "command": "D:/VSCodeWorkspace/AI Agent/GameAgent/harvester-agent/.venv/Scripts/python.exe",
+      "args": ["D:/VSCodeWorkspace/AI Agent/GameAgent/harvester-agent/mcp_server.py"]
+    }
+  }
+}
+```
+
+| Tool | Arguments | Returns |
+|------|-----------|---------|
+| `start_review` | `project=""`, `target=""` | `{"task_id", "status": "started"}` — review runs in a background thread |
+| `get_review_result` | `task_id` | `running` → `{"status", "elapsed_s"}`; `done` → `{"status", "summary", "report_json", "report_md"}`; `failed` → `{"status", "error"}` |
+| `get_latest_report` | `project=""` | newest stored report for the project: `{"generated_at", "summary", "top_findings"[:5]}`, or `{"status": "no_reports"}` |
+| `lookup_symbol` | `project`, `name` | `{"query", "hits"}` — pure index scan, never calls an LLM |
+| `ask_codebase` | `project`, `question` | `{"answer", "sources", "llm_used"}` — index RAG; degrades honestly without an API key |
+| `health` | — | `{"providers": {"kimi", "deepseek", "claude"}, "default_project_exists", "index_cached"}` |
+
+`project` may be left empty to use the default sibling project
+(`../godot-2d-space-game/project`). Only one review per project runs at a
+time — a second `start_review` while one is in flight raises a conflict
+error.
+
+**Async start/poll pattern**: a full review takes minutes, and an MCP tool
+call is a single request/response with no progress channel — a synchronous
+call would look hung to the host. So `start_review` returns immediately
+with a `task_id` and the host polls `get_review_result(task_id)` until the
+status is `done` or `failed`.
+
 ## Output
 
 Reports are saved to `reports/<timestamp>/`:

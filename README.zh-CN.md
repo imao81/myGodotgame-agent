@@ -309,6 +309,43 @@ python chat.py --show-intent --ask "审查这次提交的改动"
 `code_qa` 则返回检索到的索引条目的诚实结构化摘要，而不是编造答案
 （`llm_used=False`）。只有 `full_review` 需要可用的 key。
 
+## MCP Server
+
+`mcp_server.py` 把同一套评审/问答能力通过 stdio 暴露给任意 MCP host
+（Claude Code、Cursor、Claude Desktop……）。它是纯包装层——每个 tool
+都是对 `review.run_pipeline`、`review.load_or_build_index` 和
+`agents.qa_engine` 的薄封装，不包含任何新的评审逻辑。
+
+```jsonc
+// claude_desktop_config.json（或其他 host 的等价配置）
+{
+  "mcpServers": {
+    "harvester-agent": {
+      "command": "D:/VSCodeWorkspace/AI Agent/GameAgent/harvester-agent/.venv/Scripts/python.exe",
+      "args": ["D:/VSCodeWorkspace/AI Agent/GameAgent/harvester-agent/mcp_server.py"]
+    }
+  }
+}
+```
+
+| Tool | 参数 | 返回 |
+|------|-----------|---------|
+| `start_review` | `project=""`, `target=""` | `{"task_id", "status": "started"}` —— 评审在后台线程运行 |
+| `get_review_result` | `task_id` | `running` → `{"status", "elapsed_s"}`；`done` → `{"status", "summary", "report_json", "report_md"}`；`failed` → `{"status", "error"}` |
+| `get_latest_report` | `project=""` | 该项目最近一次落盘的报告：`{"generated_at", "summary", "top_findings"[:5]}`，或 `{"status": "no_reports"}` |
+| `lookup_symbol` | `project`, `name` | `{"query", "hits"}` —— 纯索引扫描，绝不调用 LLM |
+| `ask_codebase` | `project`, `question` | `{"answer", "sources", "llm_used"}` —— 索引 RAG；无 API key 时诚实降级 |
+| `health` | — | `{"providers": {"kimi", "deepseek", "claude"}, "default_project_exists", "index_cached"}` |
+
+`project` 可留空以使用默认的兄弟项目（`../godot-2d-space-game/project`）。
+同一项目同时只允许一个评审在跑——运行中再次调用 `start_review` 会抛出
+冲突错误。
+
+**异步 start/poll 两段式**：一次完整评审要数分钟，而 MCP tool 调用是单
+次请求/响应、没有进度通道——同步调用在 host 看来就像挂死了。所以
+`start_review` 立即返回 `task_id`，由 host 轮询
+`get_review_result(task_id)` 直到状态变为 `done` 或 `failed`。
+
 ## 输出
 
 报告保存在 `reports/<timestamp>/`：

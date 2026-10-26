@@ -6,3 +6,4 @@ numpy>=2.0
 langchain-anthropic>=1.4.0
 python-dotenv>=1.2.2
 rich>=14.3.3
+mcp>=1.30,<2

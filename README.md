@@ -283,6 +283,38 @@ python review.py --project "../godot-2d-space-game/project" --review-addons
 python game_agent_pipeline.py --print-graph
 ```
 
+## Chat / Q&A Entry
+
+`chat.py` is a product-style natural-language front door. It classifies each
+message into an intent and dispatches — the review pipeline itself is untouched.
+
+```bash
+# REPL
+python chat.py
+
+# Single question
+python chat.py --ask "MiningShip 的信号在哪声明"
+
+# Headless demo: no LLM calls at all (rule intents + retrieval-only answers)
+python chat.py --no-llm --ask "MiningShip 是什么"
+
+# Show the classification before dispatching
+python chat.py --show-intent --ask "审查这次提交的改动"
+```
+
+| Intent | Example | Action |
+|--------|---------|--------|
+| `full_review` | "帮我审查一下整个项目" | runs `review.run_pipeline` |
+| `diff_review` | "看看 diff 里有没有问题" | subprocess `game_agent_pipeline.py` (git-diff scope) |
+| `symbol_lookup` | "MiningShip 是什么" | pure index lookup, never calls the LLM |
+| `code_qa` | "采矿船怎么收集矿石？" | index RAG: top-k retrieval → LLM answer with `file:line` citations |
+| `unknown` | anything else | prints usage help |
+
+Degradation: without an API key (or with `--no-llm`) intents fall back to
+keyword rules, and `code_qa` returns an honest structured summary of the
+retrieved index entries instead of inventing an answer (`llm_used=False`).
+Only `full_review` requires a working key.
+
 ## Output
 
 Reports are saved to `reports/<timestamp>/`:

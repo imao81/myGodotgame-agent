@@ -2,7 +2,7 @@ English | [简体中文](README.zh-CN.md)
 
 # Godot Game Code Review Agent
 
-An AI-powered code review and quality assurance pipeline for Godot 4 GDScript game projects. Built and test by running the "Harvester" space mining game and is adaptable to other Godot project.
+An AI-powered code review and quality assurance pipeline for Godot 4 GDScript game projects. Built and test by running the [Harvester space mining game](https://github.com/gdquest-demos/godot-2d-space-game) and is adaptable to other Godot project.
 
 ## Overview
 
@@ -684,7 +684,7 @@ MIT License - See LICENSE file for details.
 
 ## Credits
 
-Built for the Harvester Godot 4 space mining game project using:
+Built for the [Harvester Godot 4 space mining game](https://github.com/gdquest-demos/godot-2d-space-game) project using:
 
 - [LangGraph](https://github.com/langchain-ai/langgraph) for workflow orchestration
 - [Anthropic Claude](https://www.anthropic.com/claude) & [Moonshot Kimi](https://www.moonshot.cn/) for LLM analysis

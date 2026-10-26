@@ -2,7 +2,7 @@
 
 # Godot 游戏代码审查 Agent
 
-一个面向 Godot 4 GDScript 游戏项目的 AI 驱动代码评审与质量保障流水线。围绕 "Harvester" 太空采矿游戏的实际运行构建并测试，可迁移到其他 Godot 项目。
+一个面向 Godot 4 GDScript 游戏项目的 AI 驱动代码评审与质量保障流水线。围绕 [Harvester 太空采矿游戏](https://github.com/gdquest-demos/godot-2d-space-game)的实际运行构建并测试，可迁移到其他 Godot 项目。
 
 ## 概览
 
@@ -667,7 +667,7 @@ MIT License - 详见 LICENSE 文件。
 
 ## 致谢
 
-为 Harvester Godot 4 太空采矿游戏项目构建，使用了：
+为 [Harvester Godot 4 太空采矿游戏](https://github.com/gdquest-demos/godot-2d-space-game)项目构建，使用了：
 
 - [LangGraph](https://github.com/langchain-ai/langgraph) 做工作流编排
 - [Anthropic Claude](https://www.anthropic.com/claude) 与 [Moonshot Kimi](https://www.moonshot.cn/) 做 LLM 分析

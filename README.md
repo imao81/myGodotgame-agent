@@ -674,6 +674,33 @@ python -m pytest tests/test_llm_client.py
 python -m pytest tests/ -v
 ```
 
+## Sandbox (experimental)
+
+`tools/sandbox.py` isolates agent-generated patches from the real working tree:
+
+```
+today:    approve → edit real tree → check-only → stash rollback on failure
+sandbox:  apply in isolation → all gates green → approve with evidence → promote
+```
+
+A patch is applied inside a throwaway git worktree (falls back to a plain
+directory copy for non-git projects), must pass the acceptance gates there —
+Godot `--check-only` syntax, assertion re-verification (the original finding
+should no longer reproduce), playtest regression — and only then `promote()`
+produces a `fix.patch` artifact. Failure at any step just discards the sandbox;
+the real tree is never touched. Infra-unavailable gates (e.g. no Godot) are
+honestly skipped (`None`), never silently passed.
+
+```python
+from tools.sandbox import Sandbox
+
+with Sandbox(project_root) as sb:
+    if sb.apply_patch(diff) and sb.run_gates(target_assertions).ok:
+        artifact = sb.promote()   # patch artifact only; auto_fix wiring is next phase
+```
+
+Not yet wired into the `auto_fix` node — that integration is the next phase.
+
 ## Evaluation Datasets (precision vs recall)
 
 One dataset can't measure both. This project keeps two, on purpose:

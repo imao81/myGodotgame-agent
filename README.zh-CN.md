@@ -655,6 +655,27 @@ python -m pytest tests/test_llm_client.py
 python -m pytest tests/ -v
 ```
 
+## 沙箱（实验性）
+
+`tools/sandbox.py` 把 agent 生成的补丁与真实工作区隔离：
+
+```
+现状：  审批 → 改主工作区 → check-only → 失败则 stash 回滚
+沙箱：  隔离环境 apply → 门控全绿 → 带证据审批 → promote
+```
+
+补丁先在一次性 git worktree 里应用（非 git 项目降级为目录复制），必须在那里通过验收门——Godot `--check-only` 语法门、断言重验门（原 finding 应不再复现）、playtest 回归门——全绿后 `promote()` 才产出 `fix.patch` 工件。任一步失败只需删掉沙箱，主工作区从头到尾零改动。基础设施不可用的门（如没有 Godot）诚实跳过（`None`），绝不静默放行。
+
+```python
+from tools.sandbox import Sandbox
+
+with Sandbox(project_root) as sb:
+    if sb.apply_patch(diff) and sb.run_gates(target_assertions).ok:
+        artifact = sb.promote()   # 只产出补丁工件；接入 auto_fix 是下一期
+```
+
+尚未接入 `auto_fix` 节点——接线是下一期的工作。
+
 ## 评估数据集（precision 与 recall）
 
 一个数据集没法同时衡量两者。本项目刻意保留两个：

@@ -146,11 +146,20 @@ class Sandbox:
         if self._discarded:
             return
         self._discarded = True
-        if self.mode == "worktree":
-            _git(["worktree", "remove", "--force", str(self.path)], cwd=self.project_root, check=False)
-            _git(["worktree", "prune"], cwd=self.project_root, check=False)
-        if self.path.exists():
-            shutil.rmtree(self.path, ignore_errors=True)
+        self.discard_at(self.project_root, self.path)
+
+    @staticmethod
+    def discard_at(project_root: str | Path, path: str | Path) -> None:
+        """Best-effort cleanup of a sandbox directory created in an earlier session."""
+        path = Path(path)
+        if not path.exists():
+            return
+        subprocess.run(["git", "worktree", "remove", "--force", str(path)],
+                       cwd=str(project_root), capture_output=True, text=True)
+        subprocess.run(["git", "worktree", "prune"],
+                       cwd=str(project_root), capture_output=True, text=True)
+        if path.exists():
+            shutil.rmtree(path, ignore_errors=True)
 
     def __enter__(self) -> "Sandbox":
         self.create()

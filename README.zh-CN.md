@@ -666,15 +666,15 @@ python -m pytest tests/ -v
 
 补丁先在一次性 git worktree 里应用（非 git 项目降级为目录复制），必须在那里通过验收门——Godot `--check-only` 语法门、断言重验门（原 finding 应不再复现）、playtest 回归门——全绿后 `promote()` 才产出 `fix.patch` 工件。任一步失败只需删掉沙箱，主工作区从头到尾零改动。基础设施不可用的门（如没有 Godot）诚实跳过（`None`），绝不静默放行。
 
+`--auto-fix` 模式下，流水线在人工审批前先跑 `auto_fix_prepare`：修复在沙箱内生成并通过门控后，审批才发生（interrupt 载荷里带门控证据），批准后 `auto_fix` 才从沙箱合入主工作区（保留 stash 兜底 + 合入后逐文件复检 + 失败即 git checkout 还原）。
+
 ```python
 from tools.sandbox import Sandbox
 
 with Sandbox(project_root) as sb:
     if sb.apply_patch(diff) and sb.run_gates(target_assertions).ok:
-        artifact = sb.promote()   # 只产出补丁工件；接入 auto_fix 是下一期
+        artifact = sb.promote()   # fix.patch 工件
 ```
-
-尚未接入 `auto_fix` 节点——接线是下一期的工作。
 
 ## 评估数据集（precision 与 recall）
 

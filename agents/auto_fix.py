@@ -89,6 +89,26 @@ def _validate_gd_file(project_path: str, res_path: str) -> bool:
     return result["success"]
 
 
+def _generate_fixed_code(client: LLMClient, rel_path: str, original_code: str,
+                         issues: list[dict]) -> str:
+    """Call the LLM for one file's fix. Raises on API error."""
+    issue_list = "\n".join(
+        f"  - line {i.get('line', '?')}: [{i.get('rule', '')}] {i.get('message', '')}"
+        for i in issues
+    )
+    return _strip_code_fences(client.chat(
+        [{
+            "role": "user",
+            "content": _FIX_PROMPT.format(
+                filename=rel_path,
+                issue_list=issue_list,
+                code=original_code,
+            ),
+        }],
+        max_tokens=4096,
+    ))
+
+
 # ── Core run function ─────────────────────────────────────────────────────────
 
 def run(state: dict, apply: bool = False) -> dict:
@@ -158,10 +178,6 @@ def run(state: dict, apply: bool = False) -> dict:
             continue
 
         original_code = abs_path.read_text(encoding="utf-8", errors="replace")
-        issue_list = "\n".join(
-            f"  - line {i.get('line', '?')}: [{i.get('rule', '')}] {i.get('message', '')}"
-            for i in issues
-        )
 
         if not apply:
             fix_results.append({
@@ -177,17 +193,7 @@ def run(state: dict, apply: bool = False) -> dict:
 
         # ── Call LLM ───────────────────────────────────────────────────────
         try:
-            fixed_code = _strip_code_fences(client.chat(
-                [{
-                    "role": "user",
-                    "content": _FIX_PROMPT.format(
-                        filename=rel_path,
-                        issue_list=issue_list,
-                        code=original_code,
-                    ),
-                }],
-                max_tokens=4096,
-            ))
+            fixed_code = _generate_fixed_code(client, rel_path, original_code, issues)
         except Exception as e:
             fix_results.append({
                 "file": rel_path,

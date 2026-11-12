@@ -159,6 +159,9 @@ class GameReport(TypedDict):
     auto_fix_approved: bool               # set by the human_gate interrupt
     fix_results: list[dict]               # per-file outcome records from auto_fix
     fix_summary: str
+    sandbox_path: str                     # sandbox worktree with prepared fixes (empty = legacy path)
+    fix_candidates: list[dict]            # per-file prepared fixes from auto_fix_prepare
+    fix_gate_report: dict                 # sandbox acceptance-gate evidence shown at human_gate
 
 
 def _default_state(project_path: str, no_display: bool, output_dir: str = "",
@@ -201,6 +204,9 @@ def _default_state(project_path: str, no_display: bool, output_dir: str = "",
         auto_fix_approved=False,
         fix_results=[],
         fix_summary="",
+        sandbox_path="",
+        fix_candidates=[],
+        fix_gate_report={},
     )
 
 
@@ -1355,6 +1361,95 @@ def _error_findings(state: GameReport) -> list[dict]:
             if f.get("final_severity") in _ERROR_SEVERITIES]
 
 
+def auto_fix_prepare_node(state: GameReport) -> dict:
+    """Generate LLM fixes inside an isolated sandbox and run acceptance gates.
+
+    The human gate downstream approves with evidence (gate report) instead of
+    approving blind. The real working tree is never touched in this node.
+    """
+    console.log("[bold cyan]▶ Auto Fix Prepare (sandbox)[/bold cyan]")
+
+    errors = _error_findings(state)
+    if not errors:
+        return {
+            "fix_candidates": [],
+            "fix_gate_report": {},
+            "agent_status": {"auto_fix_prepare": "skipped:no_errors"},
+        }
+
+    from tools.sandbox import Sandbox, SandboxError
+    try:
+        sb = Sandbox(state["project_path"])
+        sb.create()
+    except SandboxError as e:
+        console.log(f"[yellow]  sandbox unavailable: {e} — legacy path at auto_fix[/yellow]")
+        return {
+            "sandbox_path": "",
+            "fix_candidates": [],
+            "fix_gate_report": {},
+            "agent_status": {"auto_fix_prepare": f"sandbox_unavailable:{e}"},
+        }
+
+    by_file: dict[str, list[dict]] = {}
+    for f in errors:
+        if f.get("file"):
+            by_file.setdefault(f["file"], []).append(f)
+
+    from agents.auto_fix import _generate_fixed_code
+    from agents.llm_client import LLMClient
+    try:
+        client = LLMClient(enable_fallback=True)
+    except Exception as e:
+        client = None
+        console.log(f"[yellow]  no LLM provider: {e}[/yellow]")
+
+    candidates: list[dict] = []
+    sandbox_root = Path(sb.path)
+    for rel_path, issues in by_file.items():
+        target = sandbox_root / rel_path
+        if not target.exists():
+            candidates.append({"file": rel_path, "status": "skipped",
+                               "reason": "file not found in sandbox"})
+            continue
+        if client is None:
+            candidates.append({"file": rel_path, "status": "failed",
+                               "reason": "no LLM provider configured"})
+            continue
+        try:
+            fixed = _generate_fixed_code(
+                client, rel_path,
+                target.read_text(encoding="utf-8", errors="replace"), issues)
+        except Exception as e:
+            candidates.append({"file": rel_path, "status": "failed",
+                               "reason": f"LLM API error: {e}"})
+            continue
+        target.write_text(fixed, encoding="utf-8")
+        candidates.append({"file": rel_path, "status": "ready", "issues": len(issues)})
+
+    assertions = [f["assertion"] for f in errors if isinstance(f.get("assertion"), dict)]
+    report = sb.run_gates(target_assertions=assertions)
+    if any(c["status"] == "ready" for c in candidates):
+        sb.promote()  # keep fix.patch artifact inside the sandbox dir
+
+    gate = {
+        "syntax_ok": report.syntax_ok,
+        "assertions_resolved": report.assertions_resolved,
+        "regression_ok": report.regression_ok,
+        "ok": report.ok,
+        "details": report.details,
+    }
+    console.log(
+        f"[cyan]  {sum(1 for c in candidates if c['status'] == 'ready')}/{len(candidates)}"
+        f" file(s) prepared, gates {'green' if report.ok else 'FAILED'}[/cyan]"
+    )
+    return {
+        "sandbox_path": str(sb.path),
+        "fix_candidates": candidates,
+        "fix_gate_report": gate,
+        "agent_status": {"auto_fix_prepare": "ok" if report.ok else "gates_failed"},
+    }
+
+
 def human_gate_node(state: GameReport) -> dict:
     """Pause the graph for human approval before auto_fix rewrites files.
 
@@ -1374,11 +1469,74 @@ def human_gate_node(state: GameReport) -> dict:
         "question": "Apply auto-fix to these error findings?",
         "error_count": len(errors),
         "files": files,
+        # Evidence gathered in the sandbox: the human decides AFTER seeing
+        # whether the prepared fixes pass the acceptance gates.
+        "sandbox_gates": state.get("fix_gate_report") or {},
+        "fix_candidates": [
+            {"file": c.get("file"), "status": c.get("status")}
+            for c in state.get("fix_candidates", [])
+        ],
     })
     console.log(f"[cyan]▶ Human Gate: {'approved' if approved else 'rejected'}[/cyan]")
     return {
         "auto_fix_approved": bool(approved),
         "agent_status": {"human_gate": "approved" if approved else "rejected"},
+    }
+
+
+def _auto_fix_apply_from_sandbox(state: GameReport) -> dict:
+    """Apply sandbox-prepared fixes to the real tree (post-approval path).
+
+    The stash safety net is kept; per-file the merged content is re-validated
+    with godot --check-only and restored via git checkout on failure. The
+    sandbox is discarded at the end regardless of outcome.
+    """
+    import subprocess
+
+    from agents.auto_fix import _git_stash, _validate_gd_file
+    from tools.sandbox import Sandbox
+
+    root = Path(state["project_path"])
+    sandbox_root = Path(state["sandbox_path"])
+    candidates = [c for c in state.get("fix_candidates", []) if c.get("status") == "ready"]
+
+    label = f"auto_fix {datetime.now().strftime('%Y-%m-%dT%H:%M:%S')}"
+    if not _git_stash(str(root), label):
+        Sandbox.discard_at(root, sandbox_root)
+        return {
+            "fix_results": [],
+            "fix_summary": "git stash failed — aborting to avoid data loss.",
+            "agent_status": {"auto_fix": "stash_failed"},
+        }
+
+    results: list[dict] = []
+    for c in candidates:
+        rel = c["file"]
+        src, dst = sandbox_root / rel, root / rel
+        try:
+            dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+        except OSError as e:
+            results.append({"file": rel, "status": "failed", "reason": f"IO error: {e}"})
+            continue
+        res_path = "res://" + rel.replace("\\", "/")
+        if _validate_gd_file(str(root), res_path):
+            results.append({"file": rel, "status": "fixed",
+                            "issues_fixed": c.get("issues", 0), "sandbox_verified": True})
+        else:
+            subprocess.run(["git", "checkout", "--", rel], cwd=str(root),
+                           capture_output=True, text=True)
+            results.append({"file": rel, "status": "skipped",
+                            "reason": "post-merge check-only failed — file restored"})
+
+    Sandbox.discard_at(root, sandbox_root)
+
+    fixed = sum(1 for r in results if r["status"] == "fixed")
+    summary = (f"{fixed}/{len(results)} file(s) fixed from sandbox (gates pre-verified). "
+               f"git stash kept — run `git stash drop` when satisfied.")
+    return {
+        "fix_results": results,
+        "fix_summary": summary,
+        "agent_status": {"auto_fix": "ok" if fixed == len(results) else "ok_with_failures"},
     }
 
 
@@ -1395,6 +1553,15 @@ def auto_fix_node(state: GameReport) -> dict:
             "agent_status": {"auto_fix": "skipped:no_errors" if no_errors else "rejected"},
         }
 
+    # Sandbox path: fixes were prepared and gate-verified before approval.
+    sandbox_path = state.get("sandbox_path") or ""
+    ready = [c for c in state.get("fix_candidates", []) if c.get("status") == "ready"]
+    if ready and sandbox_path and Path(sandbox_path).exists():
+        result = _auto_fix_apply_from_sandbox(state)
+        console.log(f"[cyan]  {result['fix_summary']}[/cyan]")
+        return result
+
+    # Legacy fallback: no sandbox (unavailable, or lost between interrupted runs).
     code_issues = [
         {"file": f.get("file"), "line": f.get("line"), "severity": "error",
          "rule": f.get("rule", ""), "message": f.get("message", "")}
@@ -1564,13 +1731,15 @@ def build_graph(checkpointer=None, with_auto_fix: bool = False):
     graph.add_edge("findings_dedup",   "report_merger")
 
     if with_auto_fix:
+        graph.add_node("auto_fix_prepare", auto_fix_prepare_node)
         graph.add_node("human_gate", human_gate_node)
         graph.add_node("auto_fix",   auto_fix_node)
         graph.add_node("fix_verify", fix_verify_node)
-        graph.add_edge("report_merger", "human_gate")
-        graph.add_edge("human_gate",    "auto_fix")
-        graph.add_edge("auto_fix",      "fix_verify")
-        graph.add_edge("fix_verify",    END)
+        graph.add_edge("report_merger",    "auto_fix_prepare")
+        graph.add_edge("auto_fix_prepare", "human_gate")
+        graph.add_edge("human_gate",       "auto_fix")
+        graph.add_edge("auto_fix",         "fix_verify")
+        graph.add_edge("fix_verify",       END)
     else:
         graph.add_edge("report_merger", END)
 

@@ -691,15 +691,19 @@ produces a `fix.patch` artifact. Failure at any step just discards the sandbox;
 the real tree is never touched. Infra-unavailable gates (e.g. no Godot) are
 honestly skipped (`None`), never silently passed.
 
+With `--auto-fix`, the pipeline runs `auto_fix_prepare` before the human gate:
+fixes are generated and gate-verified inside the sandbox first, so approval is
+an informed decision (the interrupt payload carries the gate report), and
+`auto_fix` merges from the sandbox only after approval (stash safety net kept,
+per-file post-merge re-validation, git checkout restore on failure).
+
 ```python
 from tools.sandbox import Sandbox
 
 with Sandbox(project_root) as sb:
     if sb.apply_patch(diff) and sb.run_gates(target_assertions).ok:
-        artifact = sb.promote()   # patch artifact only; auto_fix wiring is next phase
+        artifact = sb.promote()   # fix.patch artifact
 ```
-
-Not yet wired into the `auto_fix` node — that integration is the next phase.
 
 ## Evaluation Datasets (precision vs recall)
 

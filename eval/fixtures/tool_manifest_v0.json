@@ -1,0 +1,29 @@
+{
+  "version": "v0 (pre-rewrite, frozen 2026-10-26)",
+  "tools": [
+    {
+      "name": "start_review",
+      "description": "Start a full propose-verify code review of a Godot project, in the background. Returns a task_id immediately — poll with get_review_result. Only one review per project runs at a time; a second call while one is running raises a conflict error."
+    },
+    {
+      "name": "get_review_result",
+      "description": "Poll a review task started by start_review. running → {status: running, elapsed_s}; done → {status: done, summary, report_json, report_md}; failed → {status: failed, error}. Unknown task_id raises an error."
+    },
+    {
+      "name": "get_latest_report",
+      "description": "Return the newest stored review report for a project (from a previous run), without running anything. {status: no_reports} when none exist."
+    },
+    {
+      "name": "lookup_symbol",
+      "description": "Find where a class, autoload, script, signal, method or scene node is declared. Pure index scan — never calls an LLM. Returns {query, hits}."
+    },
+    {
+      "name": "ask_codebase",
+      "description": "Answer a natural-language question about the codebase via index RAG: top-k retrieval over the project index, then an LLM answer with file:line citations. Without an API key it degrades honestly to a structured summary of the retrieved entries (llm_used=False)."
+    },
+    {
+      "name": "health",
+      "description": "Server self-check: which LLM providers have API keys configured, whether the default project exists, and whether the index cache is warm."
+    }
+  ]
+}

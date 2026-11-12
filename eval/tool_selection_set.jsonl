@@ -1,0 +1,25 @@
+{"request": "帮我完整审查一下这个项目", "expect": "start_review"}
+{"request": "对最近的改动跑一遍代码审查", "expect": "start_review"}
+{"request": "scan the Godot project for bugs", "expect": "start_review"}
+{"request": "开始一次全量质量检查，我要等结果", "expect": "start_review"}
+{"request": "刚才启动的审查跑完了吗", "expect": "get_review_result"}
+{"request": "task a1b2c3 的结果出来没有", "expect": "get_review_result"}
+{"request": "查一下我那个审查任务的状态", "expect": "get_review_result"}
+{"request": "did the review I kicked off finish yet?", "expect": "get_review_result"}
+{"request": "上次审查发现了哪些问题", "expect": "get_latest_report"}
+{"request": "这个项目目前的健康度怎么样", "expect": "get_latest_report"}
+{"request": "show me the latest findings from the previous run", "expect": "get_latest_report"}
+{"request": "最近的审查报告里有没有 error", "expect": "get_latest_report"}
+{"request": "PlayerShip 这个类在哪里定义的", "expect": "lookup_symbol"}
+{"request": "mine_finished 信号在哪个文件声明的", "expect": "lookup_symbol"}
+{"request": "find where the EnemyShip scene node is", "expect": "lookup_symbol"}
+{"request": "autoload Events 指向哪个脚本", "expect": "lookup_symbol"}
+{"request": "小行星簇是怎么生成矿石的", "expect": "ask_codebase"}
+{"request": "解释一下飞船的移动逻辑是怎么实现的", "expect": "ask_codebase"}
+{"request": "为什么音频在 end() 之后会静默", "expect": "ask_codebase"}
+{"request": "how does the mining state machine work?", "expect": "ask_codebase"}
+{"request": "服务现在配置了哪些模型 provider", "expect": "health"}
+{"request": "检查一下 MCP 服务器状态", "expect": "health"}
+{"request": "is the server ready? which providers are configured?", "expect": "health"}
+{"request": "今天天气怎么样", "expect": null}
+{"request": "帮我写一首关于太空的诗", "expect": null}

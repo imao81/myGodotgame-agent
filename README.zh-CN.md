@@ -655,6 +655,17 @@ python -m pytest tests/test_llm_client.py
 python -m pytest tests/ -v
 ```
 
+## MCP 工具选择评估
+
+工具描述就是给 host 模型看的 prompt——所以和 prompt 一样做 A/B。`eval/tool_selection_eval.py` 模拟 MCP host（工具清单 + 用户请求 → 选一个工具），在 25 条测试用例上对比描述版本：
+
+| 描述版本 | flash | kimi-k3 |
+|---|---|---|
+| v0（原版） | 96.0% (24/25) | 96.0% (24/25) |
+| v1（消歧版） | **100%** | **100%** |
+
+两臂在 v0 上产生了完全相同的误判（"这个项目目前的健康度怎么样" → 错选 `health` 而非 `get_latest_report`）——正是 v1 重写针对的歧义类（"项目的健康状态" vs "服务器的状态"）。报告见 `eval/results/tool_selection_*.md`。生产环境的选择统计将来从 `trace.jsonl` 直接产出，这个离线代理用于发布前 A/B。
+
 ## 轨迹追踪（Trajectory Tracing）
 
 每次运行在 `<output_dir>/trace.jsonl` 落盘轨迹级记录——不只是 finding：

@@ -143,11 +143,15 @@ mcp = FastMCP("harvester-agent")
 
 @mcp.tool()
 def start_review(project: str = "", target: str = "") -> dict:
-    """Start a full propose-verify code review of a Godot project, in the
-    background. Returns a task_id immediately — poll with get_review_result.
+    """Run a NEW full code review of a Godot project (LLM-powered; takes
+    minutes). Use when the user asks to review, scan or check a project or
+    its recent changes. Do NOT use to read results of a previous review
+    (use get_latest_report) or to answer questions about code behavior
+    (use ask_codebase).
 
-    Only one review per project runs at a time; a second call while one is
-    running raises a conflict error.
+    Returns a task_id immediately — this tool never blocks. Poll
+    get_review_result with that task_id for the outcome. Only one review
+    per project runs at a time; a concurrent second call errors.
 
     project: Godot project root (contains project.godot). Empty = default
              sibling project (../godot-2d-space-game/project).
@@ -180,7 +184,11 @@ def start_review(project: str = "", target: str = "") -> dict:
 
 @mcp.tool()
 def get_review_result(task_id: str) -> dict:
-    """Poll a review task started by start_review.
+    """Poll the status and result of ONE review task previously started via
+    start_review (requires that task's task_id). Use when the user asks
+    whether a running review has finished or what it found. Do NOT use for
+    reviews from earlier sessions whose task_id you don't have (use
+    get_latest_report instead).
 
     running → {"status": "running", "elapsed_s": N}
     done    → {"status": "done", "summary": {...}, "report_json", "report_md"}
@@ -210,8 +218,13 @@ def get_review_result(task_id: str) -> dict:
 
 @mcp.tool()
 def get_latest_report(project: str = "") -> dict:
-    """Return the newest stored review report for a project (from a previous
-    run), without running anything. {"status": "no_reports"} when none exist.
+    """Read the most recent STORED review report for a project — instant,
+    runs nothing. Use when the user asks what a previous review found, the
+    project's current health, or the latest findings. Do NOT use to start a
+    new review (use start_review) or to poll a task by id
+    (use get_review_result).
+
+    Returns {"status": "no_reports"} when none exist.
 
     project: Godot project root. Empty = default sibling project.
     """
@@ -251,8 +264,12 @@ def get_latest_report(project: str = "") -> dict:
 
 @mcp.tool()
 def lookup_symbol(project: str, name: str) -> dict:
-    """Find where a class, autoload, script, signal, method or scene node is
-    declared. Pure index scan — never calls an LLM. Returns {"query", "hits"}.
+    """Locate where a symbol is DECLARED — class, autoload, script, signal,
+    method or scene node. Instant, pure index scan, never calls an LLM.
+    Use for "where is X defined/declared" questions. For "how does X work"
+    or "why does X happen" questions use ask_codebase instead.
+
+    Returns {"query", "hits"} with file paths and line numbers.
     """
     project_root = _resolve_project(project)
     index, _index_path = load_or_build_index(project_root)
@@ -261,10 +278,14 @@ def lookup_symbol(project: str, name: str) -> dict:
 
 @mcp.tool()
 def ask_codebase(project: str, question: str) -> dict:
-    """Answer a natural-language question about the codebase via index RAG:
-    top-k retrieval over the project index, then an LLM answer with
-    file:line citations. Without an API key it degrades honestly to a
-    structured summary of the retrieved entries (llm_used=False).
+    """Answer a free-form question about HOW the code works or WHY it
+    behaves a certain way — RAG over the project symbol index, then an LLM
+    answer with file:line citations. Use for "how/why/explain" questions
+    about code behavior. For locating a symbol's declaration use
+    lookup_symbol; for running a full quality review use start_review.
+
+    Without an API key it degrades honestly to a structured summary of the
+    retrieved entries (llm_used=False).
 
     Returns {"answer", "sources", "llm_used"}.
     """
@@ -276,8 +297,10 @@ def ask_codebase(project: str, question: str) -> dict:
 
 @mcp.tool()
 def health() -> dict:
-    """Server self-check: which LLM providers have API keys configured,
-    whether the default project exists, and whether the index cache is warm.
+    """Check the MCP server's own status: which LLM providers have API keys
+    configured, whether the default project exists, and whether the index
+    cache is warm. Use for diagnostics about the server, not for questions
+    about project code or review results.
     """
     return {
         "providers": {name: bool(os.environ.get(env))

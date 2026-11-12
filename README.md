@@ -691,6 +691,24 @@ produces a `fix.patch` artifact. Failure at any step just discards the sandbox;
 the real tree is never touched. Infra-unavailable gates (e.g. no Godot) are
 honestly skipped (`None`), never silently passed.
 
+## MCP Tool-Selection Eval
+
+Tool descriptions are prompts for the host model — so they get A/B-tested like
+prompts. `eval/tool_selection_eval.py` simulates an MCP host (manifest + user
+request → pick one tool) over a 25-case fixture, comparing description
+versions:
+
+| manifest | flash | kimi-k3 |
+|---|---|---|
+| v0 (original) | 96.0% (24/25) | 96.0% (24/25) |
+| v1 (disambiguated) | **100%** | **100%** |
+
+Both arms produced the identical v0 confusion ("这个项目目前的健康度怎么样"
+→ `health` instead of `get_latest_report`) — exactly the ambiguity class the
+v1 rewrite targeted ("health status of the project" vs "status of the
+server"). Reports: `eval/results/tool_selection_*.md`. Production selection
+stats would come from `trace.jsonl`; this offline proxy is for pre-ship A/B.
+
 ## Trajectory Tracing
 
 Every run writes `<output_dir>/trace.jsonl` — a trajectory-level record, not

@@ -691,7 +691,22 @@ produces a `fix.patch` artifact. Failure at any step just discards the sandbox;
 the real tree is never touched. Infra-unavailable gates (e.g. no Godot) are
 honestly skipped (`None`), never silently passed.
 
-With `--auto-fix`, the pipeline runs `auto_fix_prepare` before the human gate:
+## Trajectory Tracing
+
+Every run writes `<output_dir>/trace.jsonl` — a trajectory-level record, not
+just findings:
+
+- `llm_call` events: provider, model, caller (which module/node made the call),
+  token usage, latency, outcome — including every fallback attempt
+- `node_span` events: per-graph-node duration and ok/error status
+
+Default off-text (sizes only); set `TRACE_FULL=1` to persist full prompts and
+completions. Standalone tools (review.py, chat.py) are never traced
+accidentally — tracing activates only for pipeline runs. This is what made
+incidents like "a thinking model silently burned 12k tokens and returned empty
+content" diagnosable from data instead of luck.
+
+## Sandbox (experimental)
 fixes are generated and gate-verified inside the sandbox first, so approval is
 an informed decision (the interrupt payload carries the gate report), and
 `auto_fix` merges from the sandbox only after approval (stash safety net kept,

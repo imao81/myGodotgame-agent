@@ -1682,25 +1682,30 @@ def build_graph(checkpointer=None, with_auto_fix: bool = False):
     """
     graph = StateGraph(GameReport)
 
-    graph.add_node("preflight_check",  preflight_check_node)
-    graph.add_node("build_index",      build_index_node)
-    graph.add_node("resolve_scope",    resolve_scope_node)
-    graph.add_node("route_files",      route_files_node)
-    graph.add_node("pipeline_check",   pipeline_check_node,
-                   retry_policy=RetryPolicy(
-                       max_attempts=3, initial_interval=1.0,
-                       backoff_factor=2.0, jitter=True,
-                       # default_retry_on excludes OSError as "deterministic";
-                       # for us a vanished/crashed Godot binary is transient.
-                       retry_on=_TRANSIENT_ERRORS,
-                   ))
-    graph.add_node("code_review",      code_review_node)
-    graph.add_node("playtest",         playtest_node)
-    graph.add_node("runtime_verifier", runtime_verifier_node)
-    graph.add_node("cross_correlator", cross_correlator_node)
-    graph.add_node("filter_refuted",   filter_refuted_node)
-    graph.add_node("findings_dedup",   findings_dedup_node)
-    graph.add_node("report_merger",    report_merger_node)
+    from tools.tracer import traced
+
+    def _add(name, fn, **kw):
+        graph.add_node(name, traced(name, fn), **kw)
+
+    _add("preflight_check",  preflight_check_node)
+    _add("build_index",      build_index_node)
+    _add("resolve_scope",    resolve_scope_node)
+    _add("route_files",      route_files_node)
+    _add("pipeline_check",   pipeline_check_node,
+         retry_policy=RetryPolicy(
+             max_attempts=3, initial_interval=1.0,
+             backoff_factor=2.0, jitter=True,
+             # default_retry_on excludes OSError as "deterministic";
+             # for us a vanished/crashed Godot binary is transient.
+             retry_on=_TRANSIENT_ERRORS,
+         ))
+    _add("code_review",      code_review_node)
+    _add("playtest",         playtest_node)
+    _add("runtime_verifier", runtime_verifier_node)
+    _add("cross_correlator", cross_correlator_node)
+    _add("filter_refuted",   filter_refuted_node)
+    _add("findings_dedup",   findings_dedup_node)
+    _add("report_merger",    report_merger_node)
 
     # START → preflight
     graph.add_edge(START, "preflight_check")
@@ -1731,10 +1736,10 @@ def build_graph(checkpointer=None, with_auto_fix: bool = False):
     graph.add_edge("findings_dedup",   "report_merger")
 
     if with_auto_fix:
-        graph.add_node("auto_fix_prepare", auto_fix_prepare_node)
-        graph.add_node("human_gate", human_gate_node)
-        graph.add_node("auto_fix",   auto_fix_node)
-        graph.add_node("fix_verify", fix_verify_node)
+        _add("auto_fix_prepare", auto_fix_prepare_node)
+        _add("human_gate", human_gate_node)
+        _add("auto_fix",   auto_fix_node)
+        _add("fix_verify", fix_verify_node)
         graph.add_edge("report_merger",    "auto_fix_prepare")
         graph.add_edge("auto_fix_prepare", "human_gate")
         graph.add_edge("human_gate",       "auto_fix")
@@ -1909,6 +1914,8 @@ def main() -> None:
             sys.exit(2)
         output_dir = Path(snapshot.values.get("output_dir") or
                           args.output or "reports/resumed")
+        from tools import tracer
+        tracer.start_run(output_dir)
         interrupts = [i for task in snapshot.tasks for i in task.interrupts]
         if interrupts:
             # Paused at the human gate: answer it.
@@ -1925,6 +1932,9 @@ def main() -> None:
     else:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_dir = Path(args.output) if args.output else Path("reports") / timestamp
+        output_dir.mkdir(parents=True, exist_ok=True)
+        from tools import tracer
+        tracer.start_run(output_dir)
 
         console.print(Panel(
             f"[bold]Harvester Game Agent Pipeline[/bold]\n"
@@ -1940,6 +1950,15 @@ def main() -> None:
             config,
         )
         result = _resolve_interrupts(app, config, result, args, output_dir)
+
+    from tools import tracer
+    trace_summary = tracer.end_run()
+    if trace_summary:
+        console.log(
+            f"[dim]trace: {trace_summary['llm_calls']} LLM call(s), "
+            f"{trace_summary['node_spans']} node span(s) → "
+            f"{trace_summary['trace_path']}[/dim]"
+        )
 
     health = result.get("overall_health", "unknown")
     color = {"green": "green", "yellow": "yellow", "red": "red"}.get(health, "white")

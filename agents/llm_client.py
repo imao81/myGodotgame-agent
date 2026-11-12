@@ -45,7 +45,10 @@ Usage:
 from __future__ import annotations
 
 import os
+import time
 from typing import TYPE_CHECKING, Optional, cast
+
+from tools import tracer
 
 if TYPE_CHECKING:
     from anthropic.types import (
@@ -70,6 +73,22 @@ _CLAUDE_VISION_MODEL = "claude-sonnet-4-6"
 _KIMI_TEXT_MODEL = os.environ.get("KIMI_TEXT_MODEL", "kimi-k3")
 _KIMI_VISION_MODEL = os.environ.get("KIMI_VISION_MODEL", "moonshot-v1-8k-vision-preview")
 _DEEPSEEK_TEXT_MODEL = os.environ.get("DEEPSEEK_TEXT_MODEL", "deepseek-v4-pro")
+
+_DEFAULT_MODELS = {
+    "claude": _CLAUDE_TEXT_MODEL,
+    "kimi": _KIMI_TEXT_MODEL,
+    "deepseek": _DEEPSEEK_TEXT_MODEL,
+}
+
+
+def _messages_to_text(messages: list) -> str:
+    """Flatten chat messages for trace logging (roles stripped, text only)."""
+    parts = []
+    for m in messages:
+        content = m.get("content") if isinstance(m, dict) else None
+        if isinstance(content, str):
+            parts.append(content)
+    return "\n".join(parts)
 
 # Kimi models that reject thinking=disabled (verified 2026-10-25).
 _KIMI_THINKING_FORCED = frozenset({"kimi-k2.7-code", "kimi-k2.7-code-highspeed"})
@@ -141,6 +160,9 @@ class LLMClient:
         self._deepseek_client = None
         if self.provider in ("kimi", "deepseek"):
             self._get_compat_client(self.provider)  # validate key at construction
+
+    def _model_for(self, provider: str) -> str:
+        return self._model or _DEFAULT_MODELS.get(provider, "")
 
     # ── Internal: Claude ───────────────────────────────────────────────────────
 
@@ -293,18 +315,28 @@ class LLMClient:
                 f"Unknown LLM provider: {self.provider!r}. "
                 f"Use one of: {sorted(dispatch)}."
             )
-        try:
-            return dispatch[self.provider](messages, max_tokens)
-        except Exception:
-            if self.enable_fallback:
-                for candidate in _fallback_candidates(self.provider):
-                    if candidate in dispatch:
-                        try:
-                            return dispatch[candidate](messages, max_tokens)
-                        except Exception:
-                            continue
-            self.last_usage = None
-            raise
+        providers = [self.provider]
+        if self.enable_fallback:
+            providers += [c for c in _fallback_candidates(self.provider)
+                          if c in dispatch]
+        prompt_text = _messages_to_text(messages)
+        last_err: Exception | None = None
+        for provider in providers:
+            t0 = time.perf_counter()
+            try:
+                out = dispatch[provider](messages, max_tokens)
+                tracer.record_llm(provider, self._model_for(provider), self.last_usage,
+                                  time.perf_counter() - t0, True,
+                                  prompt_text=prompt_text, completion_text=out)
+                return out
+            except Exception as e:
+                tracer.record_llm(provider, self._model_for(provider), self.last_usage,
+                                  time.perf_counter() - t0, False,
+                                  error=str(e), prompt_text=prompt_text)
+                last_err = e
+                continue
+        self.last_usage = None
+        raise last_err
 
     def chat_vision(
         self,

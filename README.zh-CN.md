@@ -655,6 +655,15 @@ python -m pytest tests/test_llm_client.py
 python -m pytest tests/ -v
 ```
 
+## 轨迹追踪（Trajectory Tracing）
+
+每次运行在 `<output_dir>/trace.jsonl` 落盘轨迹级记录——不只是 finding：
+
+- `llm_call` 事件：provider、模型、调用方（哪个模块/节点发起）、token 用量、延迟、成败——包括每一次 fallback 尝试
+- `node_span` 事件：每个图节点的耗时与 ok/error 状态
+
+默认只记大小不记正文；`TRACE_FULL=1` 时持久化完整 prompt 与补全。独立工具（review.py、chat.py）不会被误开——只有 pipeline 运行才激活追踪。正是这类记录让"思维链模型静默烧掉 12k token 返回空内容"这种事故靠数据定位，而不是靠运气撞上。
+
 ## 沙箱（实验性）
 
 `tools/sandbox.py` 把 agent 生成的补丁与真实工作区隔离：

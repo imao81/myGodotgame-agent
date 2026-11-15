@@ -1,0 +1,197 @@
+name: Godot Review (reusable)
+
+# Reusable PR quality gate for Godot projects. Caller example:
+#
+#   jobs:
+#     review:
+#       permissions:
+#         pull-requests: write
+#       uses: imao81/myGodotgame-agent/.github/workflows/godot-review.yml@main
+#       with:
+#         project-path: "."
+#         scope: "diff"
+#       secrets:
+#         MOONSHOT_API_KEY: ${{ secrets.MOONSHOT_API_KEY }}
+#
+# No API key configured → static-only review (Godot CLI checks), never a
+# false green: the PR comment and report state "LLM review not run".
+
+on:
+  workflow_call:
+    inputs:
+      project-path:
+        description: "Path to the Godot project (dir containing project.godot)"
+        type: string
+        default: "."
+      scope:
+        description: "diff = only files changed by the PR; full = whole project"
+        type: string
+        default: "diff"
+      godot-version:
+        type: string
+        default: "4.6.1"
+      python-version:
+        type: string
+        default: "3.12"
+      agent-repository:
+        description: "Repo hosting the agent (override for self-dogfooding)"
+        type: string
+        default: "imao81/myGodotgame-agent"
+      agent-ref:
+        type: string
+        default: "main"
+      game-repository:
+        description: "External repo to review (empty = caller's own repo)"
+        type: string
+        default: ""
+      game-ref:
+        type: string
+        default: ""
+    secrets:
+      MOONSHOT_API_KEY:
+        required: false
+      DEEPSEEK_API_KEY:
+        required: false
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write  # sticky comment; forks get read-only → comment step fails soft
+    concurrency:
+      group: godot-review-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
+
+    steps:
+      - name: Checkout caller repo (the project under review)
+        if: inputs.game-repository == ''
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # the base-SHA diff needs history
+
+      - name: Checkout external game repo
+        if: inputs.game-repository != ''
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.game-repository }}
+          ref: ${{ inputs.game-ref }}
+          path: game
+          fetch-depth: 0
+
+      - name: Checkout the agent
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.agent-repository }}
+          ref: ${{ inputs.agent-ref }}
+          path: .harvester-agent
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: pip
+          cache-dependency-path: .harvester-agent/requirements.txt
+
+      - uses: chickensoftgames/setup-godot@v2
+        with:
+          version: ${{ inputs.godot-version }}
+          use-dotnet: false
+
+      - run: pip install -r .harvester-agent/requirements.txt
+
+      - name: Resolve project path
+        id: paths
+        run: |
+          if [ -n "${{ inputs.game-repository }}" ]; then
+            echo "project_root=game" >> "$GITHUB_OUTPUT"
+          else
+            echo "project_root=." >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run review pipeline
+        env:
+          MOONSHOT_API_KEY: ${{ secrets.MOONSHOT_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          # diff mode: three-dot diff vs the PR base; full mode: empty → all files
+          GIT_BASE_SHA: ${{ inputs.scope == 'diff' && github.event.pull_request.base.sha || '' }}
+        run: |
+          set +e
+          python .harvester-agent/game_agent_pipeline.py \
+            --project "${{ steps.paths.outputs.project_root }}/${{ inputs.project-path }}" \
+            --no-display \
+            --output "$GITHUB_WORKSPACE/review-report"
+          echo "EXIT_CODE=$?" >> "$GITHUB_ENV"
+
+      - name: Build PR comment body
+        if: always() && github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set +e
+          {
+            if [ -f review-report/run_metadata.json ]; then
+              HEALTH=$(jq -r '.overall_health // "unknown"' review-report/run_metadata.json)
+              DEGRADED=$(jq -r '.degradation_reason // empty' review-report/run_metadata.json)
+            else
+              HEALTH="unknown"; DEGRADED=""
+            fi
+            case "$HEALTH" in
+              green)  EMOJI="🟢" ;;
+              yellow) EMOJI="🟡" ;;
+              red)    EMOJI="🔴" ;;
+              *)      EMOJI="⚪" ;;
+            esac
+            echo "## $EMOJI Godot Review: ${HEALTH^^}"
+            echo ""
+            if [ -n "$DEGRADED" ]; then
+              echo "> ⚠️ LLM review degraded: $DEGRADED"
+              echo ""
+            fi
+            if [ -f review-report/final_report.md ]; then
+              head -60 review-report/final_report.md
+            fi
+            echo ""
+            echo "---"
+            echo "Full report: workflow artifact \`review-report\`."
+          } > pr-comment.md
+
+      - name: Sticky PR comment
+        if: always() && github.event_name == 'pull_request'
+        continue-on-error: true  # fork PRs get read-only tokens
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('pr-comment.md', 'utf8')
+              + '\n<!-- godot-review -->';
+            const marker = '<!-- godot-review -->';
+            const {owner, repo} = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            const {data: comments} = await github.rest.issues.listComments(
+              {owner, repo, issue_number, per_page: 100});
+            const existing = comments.find(c => c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment(
+                {owner, repo, comment_id: existing.id, body});
+            } else {
+              await github.rest.issues.createComment(
+                {owner, repo, issue_number, body});
+            }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: review-report
+          path: review-report/
+          if-no-files-found: ignore
+
+      - name: Quality gate
+        if: always()
+        run: |
+          if [ "$EXIT_CODE" = "2" ]; then
+            echo "::error::Pipeline could not run (bad input or preflight abort) — check the job log"
+            exit 2
+          elif [ "$EXIT_CODE" = "1" ]; then
+            echo "::error::Review health is RED — merge blocked"
+            exit 1
+          fi
+          echo "gate passed (exit $EXIT_CODE)"

@@ -670,6 +670,28 @@ python -m pytest tests/ -v
 
 检测能力强不等于修复能力强：审查召回更高的臂（k3，88.5% 对 80.8%）反而是更差的修复者，差距集中在 break_preload_path 类（1/5 对 5/5）。单次运行、n=26——当信号看，不当定论。
 
+## 作为 GitHub Action 使用（PR 质量卡点）
+
+往你的 Godot 项目仓库加一个文件即可，零安装：
+
+```yaml
+# .github/workflows/godot-review.yml
+name: Godot Review
+on: pull_request
+jobs:
+  review:
+    permissions:
+      pull-requests: write
+    uses: imao81/myGodotgame-agent/.github/workflows/godot-review.yml@main
+    with:
+      project-path: "."     # 含 project.godot 的目录
+      scope: "diff"         # 只审 PR 改动；"full" = 全量
+    secrets:
+      MOONSHOT_API_KEY: ${{ secrets.MOONSHOT_API_KEY }}   # 可选
+```
+
+每个 PR：流水线审查 diff（对 base SHA 的三点 diff——生成文件永不进入 scope），在 PR 评论区贴出健康分级的置顶评论（重复运行更新同一条，不刷屏），健康为 red 时阻止合并。不配 API key 时跑纯静态审查（Godot CLI 校验），评论里会明说"LLM 审查未运行"——绝不静默放行。本仓库自己的 PR 也走同一个 workflow（dogfooding，见 `.github/workflows/pr-gate.yml`）。
+
 ## MCP 工具选择评估
 
 工具描述就是给 host 模型看的 prompt——所以和 prompt 一样做 A/B。`eval/tool_selection_eval.py` 模拟 MCP host（工具清单 + 用户请求 → 选一个工具），在 25 条测试用例上对比描述版本：

@@ -162,6 +162,7 @@ class GameReport(TypedDict):
     sandbox_path: str                     # sandbox worktree with prepared fixes (empty = legacy path)
     fix_candidates: list[dict]            # per-file prepared fixes from auto_fix_prepare
     fix_gate_report: dict                 # sandbox acceptance-gate evidence shown at human_gate
+    scope_mode: str                       # "diff" | "full" | "none" (CI base-ref, nothing to review)
 
 
 def _default_state(project_path: str, no_display: bool, output_dir: str = "",
@@ -207,6 +208,7 @@ def _default_state(project_path: str, no_display: bool, output_dir: str = "",
         sandbox_path="",
         fix_candidates=[],
         fix_gate_report={},
+        scope_mode="",
     )
 
 
@@ -225,8 +227,15 @@ def _elapsed(t0: float) -> str:
 
 # ── Scope resolution helpers ───────────────────────────────────────────────────
 
-def _get_git_changed_files(project_path: Path) -> set[str]:
-    """Return project-relative paths of changed .gd/.tscn/.tres files vs HEAD."""
+def _get_git_changed_files(project_path: Path, base_ref: str | None = None) -> set[str]:
+    """Return project-relative paths of changed .gd/.tscn/.tres files.
+
+    Default mode: working-tree changes vs HEAD (local development).
+    CI mode (base_ref set, e.g. a PR base SHA): three-dot diff
+    ``base_ref...HEAD`` — the changes a PR introduces. Untracked files are
+    ignored in CI mode: generated junk (.godot/, .import) must never
+    enter the scope.
+    """
     try:
         r = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
@@ -239,22 +248,33 @@ def _get_git_changed_files(project_path: Path) -> set[str]:
         # Run from git_root so both commands emit root-relative paths:
         # `git diff --name-only` is root-relative from any cwd, but
         # `git ls-files` is cwd-relative — mixing them silently drops files.
-        r1 = subprocess.run(["git", "diff", "--name-only", "HEAD"],
-                             capture_output=True, text=True,
-                             cwd=str(git_root), timeout=10)
-        r2 = subprocess.run(["git", "ls-files", "--others", "--exclude-standard"],
-                             capture_output=True, text=True,
-                             cwd=str(git_root), timeout=10)
+        if base_ref:
+            # CI mode: three-dot diff vs the PR base; untracked files are
+            # generated junk (.godot/, .import) and never enter the scope.
+            r1 = subprocess.run(
+                ["git", "diff", "--name-only", f"{base_ref}...HEAD"],
+                capture_output=True, text=True, cwd=str(git_root), timeout=10)
+            outputs = [r1.stdout]
+        else:
+            r1 = subprocess.run(["git", "diff", "--name-only", "HEAD"],
+                                 capture_output=True, text=True,
+                                 cwd=str(git_root), timeout=10)
+            r2 = subprocess.run(["git", "ls-files", "--others", "--exclude-standard"],
+                                 capture_output=True, text=True,
+                                 cwd=str(git_root), timeout=10)
+            outputs = [r1.stdout, r2.stdout]
 
         relevant_exts = {".gd", ".tscn", ".tres"}
         changed: set[str] = set()
-        for raw in r1.stdout.splitlines() + r2.stdout.splitlines():
+        for raw in "\n".join(outputs).splitlines():
             raw = raw.strip()
             if not raw:
                 continue
             abs_path = git_root / raw
             if abs_path.suffix not in relevant_exts:
                 continue
+            if ".godot" in abs_path.parts:
+                continue  # generated engine state, never reviewable source
             try:
                 changed.add(str(abs_path.relative_to(project_path)))
             except ValueError:
@@ -517,17 +537,28 @@ def build_index_node(state: GameReport) -> dict:
 # ── Node: resolve_scope ───────────────────────────────────────────────────────
 
 def resolve_scope_node(state: GameReport) -> dict:
-    """Read project_index.json from disk + run git diff → output file scope set."""
+    """Read project_index.json from disk + run git diff → output file scope set.
+
+    scope_mode: "diff" (changed files), "full" (no base ref given / no diff
+    locally), or "none" (CI mode with a base ref and zero relevant changes —
+    an empty PR diff must NOT escalate to a full review).
+    """
     t0 = time.perf_counter()
     console.log("[bold cyan]▶ Resolve Scope[/bold cyan]")
 
     project_path = Path(state["project_path"])
-    changed = _get_git_changed_files(project_path)
+    base_ref = os.environ.get("GIT_BASE_SHA") or None
+    changed = _get_git_changed_files(project_path, base_ref=base_ref)
 
     if not changed:
+        if base_ref:
+            console.log("[dim]  No relevant changes vs base — nothing to review[/dim]")
+            return {"scope": [], "scope_mode": "none",
+                    "agent_status": {"resolve_scope": "ok:no_changes"}}
         console.log("[dim]  No git diff — full project in scope[/dim]")
         console.log(f"[dim]  ✓ done in {_elapsed(t0)}[/dim]")
-        return {"scope": [], "agent_status": {"resolve_scope": "ok:full_project"}}
+        return {"scope": [], "scope_mode": "full",
+                "agent_status": {"resolve_scope": "ok:full_project"}}
 
     scope = _expand_dependency_scope(project_path, changed)
     console.log(
@@ -535,6 +566,7 @@ def resolve_scope_node(state: GameReport) -> dict:
     )
     return {
         "scope": sorted(scope),
+        "scope_mode": "diff",
         "agent_status": {"resolve_scope": f"ok:{len(scope)}_files"},
     }
 
@@ -818,6 +850,11 @@ def code_review_node(state: GameReport) -> dict:
     """
     t0 = time.perf_counter()
     console.log("[bold cyan]▶ Code Review[/bold cyan]")
+
+    if state.get("scope_mode") == "none":
+        console.log("[dim]  no relevant changes vs base — LLM review skipped[/dim]")
+        return {"findings": [], "skipped_files": [],
+                "agent_status": {"code_review": "skipped:no_changes"}}
 
     if state.get("fallback_mode") == "static_only":
         console.log("[yellow]  Static-only mode — running syntax-only fallback[/yellow]")

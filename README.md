@@ -717,6 +717,33 @@ Detection strength does not transfer to repair: the arm with higher review
 recall (k3, 88.5% vs 80.8%) is the *worse* fixer, driven by break_preload_path
 (1/5 vs 5/5). Single-run, n=26 — treat as signal, not proof.
 
+## Use as a GitHub Action (PR quality gate)
+
+Add one file to your Godot project's repo — no install:
+
+```yaml
+# .github/workflows/godot-review.yml
+name: Godot Review
+on: pull_request
+jobs:
+  review:
+    permissions:
+      pull-requests: write
+    uses: imao81/myGodotgame-agent/.github/workflows/godot-review.yml@main
+    with:
+      project-path: "."     # dir containing project.godot
+      scope: "diff"         # only files changed by the PR; "full" = everything
+    secrets:
+      MOONSHOT_API_KEY: ${{ secrets.MOONSHOT_API_KEY }}   # optional
+```
+
+On every PR: the pipeline reviews the diff (three-dot vs the PR base —
+generated files never enter the scope), posts a sticky PR comment with the
+health grade, and blocks merge when health is red. Without an API key it runs
+static-only (Godot CLI checks) and the comment says so explicitly — never a
+silent green. This repo gates its own PRs through the same workflow
+(dogfooding, see `.github/workflows/pr-gate.yml`).
+
 ## MCP Tool-Selection Eval
 
 Tool descriptions are prompts for the host model — so they get A/B-tested like

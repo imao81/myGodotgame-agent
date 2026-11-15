@@ -1,32 +1,24 @@
 name: PR Quality Gate
 
+# Dogfood: this repo gates its own PRs through the same reusable workflow
+# external users consume — reviewing the public gdquest game demo with the
+# PR's own agent code.
+
 on:
   pull_request:
 
 jobs:
   gate:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: gdquest-demos/godot-2d-space-game
-          path: godot-2d-space-game
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - uses: chickensoftgames/setup-godot@v2
-        with:
-          version: 4.6.1
-          use-dotnet: false
-      - run: pip install -r requirements.txt
-      - name: Run pipeline (red health = gate failure)
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          MOONSHOT_API_KEY: ${{ secrets.MOONSHOT_API_KEY }}
-        run: python game_agent_pipeline.py --project godot-2d-space-game/project --no-display
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: pipeline-report
-          path: reports/
+    permissions:
+      contents: read
+      pull-requests: write
+    uses: ./.github/workflows/godot-review.yml
+    with:
+      game-repository: gdquest-demos/godot-2d-space-game
+      project-path: project
+      scope: full
+      agent-repository: ${{ github.repository }}
+      agent-ref: ${{ github.head_ref || github.ref }}
+    secrets:
+      MOONSHOT_API_KEY: ${{ secrets.MOONSHOT_API_KEY }}
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}

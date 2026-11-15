@@ -845,3 +845,5 @@ Built for the [Harvester Godot 4 space mining game](https://github.com/gdquest-d
 - [LangGraph](https://github.com/langchain-ai/langgraph) for workflow orchestration
 - [Anthropic Claude](https://www.anthropic.com/claude) & [Moonshot Kimi](https://www.moonshot.cn/) for LLM analysis
 - Godot 4 CLI for static and runtime validation
+
+<!-- dogfood test PR: exercises the reusable godot-review workflow -->

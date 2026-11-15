@@ -164,6 +164,83 @@ class TestGates:
         assert report.ok
 
 
+class TestExplicitChangedFiles:
+    """Copy-mode sandbox + direct file writes: syntax gate must still run
+    when the caller passes changed_files explicitly (fix_agent path)."""
+
+    def test_explicit_changed_files_drive_syntax_gate(self, tmp_path, monkeypatch):
+        import sys as _sys
+        proj = tmp_path / "plain"
+        proj.mkdir()
+        (proj / "a.gd").write_text("extends Node2D\nvar speed = 100\n")
+        sb = Sandbox(proj, tmp_path / "sb")
+        sb.create()
+        assert sb.mode == "copy"
+        # direct write, bypassing apply_patch — invisible to _changed_files
+        (sb.path / "a.gd").write_text("extends Node2D\nvar speed = 200\n")
+
+        calls = []
+        monkeypatch.setattr("tools.sandbox.godot_runner.GODOT_EXECUTABLE",
+                            _sys.executable)
+
+        def fake_run_script(project_path, script_path, timeout=30):
+            calls.append(script_path)
+            return {"success": True, "output": "", "errors": [], "returncode": 0}
+
+        monkeypatch.setattr("tools.sandbox.godot_runner.run_script",
+                            fake_run_script)
+        report = sb.run_gates(changed_files=["a.gd"])
+        assert report.syntax_ok is True
+        assert len(calls) == 1 and calls[0].endswith("a.gd")
+        sb.discard()
+
+
+class TestSyntaxBaseline:
+    """--check-only --script can't resolve class_name globals; pristine files
+    may already fail. The gate must only fail on NEW errors."""
+
+    def test_preexisting_errors_ignored(self, repo, sandbox_dir, monkeypatch):
+        import sys as _sys
+        monkeypatch.setattr("tools.sandbox.godot_runner.GODOT_EXECUTABLE",
+                            _sys.executable)
+
+        def fake_run_script(project_path, script_path, timeout=30):
+            return {"success": False, "output": "",
+                    "errors": ['Could not find type "PlayerShip"'],
+                    "returncode": 1}
+
+        monkeypatch.setattr("tools.sandbox.godot_runner.run_script",
+                            fake_run_script)
+        with Sandbox(repo, sandbox_dir) as sb:
+            (sb.path / "player.gd").write_text("extends Node2D\nvar s = 1\n")
+            report = sb.run_gates(
+                changed_files=["player.gd"],
+                syntax_baseline={"player.gd": {'Could not find type "PlayerShip"'}})
+        assert report.syntax_ok is True
+        assert any("pre-existing" in d for d in report.details)
+
+    def test_new_error_fails_despite_baseline(self, repo, sandbox_dir, monkeypatch):
+        import sys as _sys
+        monkeypatch.setattr("tools.sandbox.godot_runner.GODOT_EXECUTABLE",
+                            _sys.executable)
+
+        def fake_run_script(project_path, script_path, timeout=30):
+            return {"success": False, "output": "",
+                    "errors": ['Could not find type "PlayerShip"',
+                               "Parse error at line 3"],
+                    "returncode": 1}
+
+        monkeypatch.setattr("tools.sandbox.godot_runner.run_script",
+                            fake_run_script)
+        with Sandbox(repo, sandbox_dir) as sb:
+            (sb.path / "player.gd").write_text("extends Node2D\nvar s = 1\n")
+            report = sb.run_gates(
+                changed_files=["player.gd"],
+                syntax_baseline={"player.gd": {'Could not find type "PlayerShip"'}})
+        assert report.syntax_ok is False
+        assert any("Parse error at line 3" in d for d in report.details)
+
+
 class TestGateReport:
     def test_none_is_not_failure(self):
         assert GateReport(syntax_ok=None, regression_ok=None).ok

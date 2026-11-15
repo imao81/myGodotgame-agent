@@ -655,6 +655,21 @@ python -m pytest tests/test_llm_client.py
 python -m pytest tests/ -v
 ```
 
+## 修复 Agent（有界循环，验证优先）
+
+修复路径是有界反馈循环，不是一次性全文件重写：模型产出手术式编辑块（`tools/patch_format.py`——ORIGINAL 段必须精确且唯一匹配，幻觉定位直接拒绝），每次尝试过沙箱三门验收，失败的门输出作为下一轮输入（最多 3 轮，耗尽则诚实上报失败）。每轮从原始文件重新开始。整文件响应仅在 diff 比例低于阈值时被容忍——"顺手重构"是被度量的，不是被假设不存在的。
+
+`eval/fix_benchmark.py` 把变异集反过来用：26 个注入 bug 就是 26 个修复任务，自带 ground truth（修复后期望断言不得再复现）。指标：修复率、平均轮次、越界率、token 成本——见 `eval/results/fix_benchmark.*`。
+
+首轮结果（26 个 mutant，每臂各跑一遍）：
+
+| 臂 | 修复率 | 平均轮次 | 越界 |
+|---|---|---|---|
+| deepseek-flash | **92.3%**（24/26） | 1.15 | 0 |
+| kimi-k3 | 76.9%（20/26） | 1.46 | 0 |
+
+检测能力强不等于修复能力强：审查召回更高的臂（k3，88.5% 对 80.8%）反而是更差的修复者，差距集中在 break_preload_path 类（1/5 对 5/5）。单次运行、n=26——当信号看，不当定论。
+
 ## MCP 工具选择评估
 
 工具描述就是给 host 模型看的 prompt——所以和 prompt 一样做 A/B。`eval/tool_selection_eval.py` 模拟 MCP host（工具清单 + 用户请求 → 选一个工具），在 25 条测试用例上对比描述版本：

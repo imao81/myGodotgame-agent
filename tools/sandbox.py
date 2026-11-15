@@ -114,11 +114,13 @@ class Sandbox:
         finally:
             patch_file.unlink(missing_ok=True)
 
-    def run_gates(self, target_assertions: list[dict] | None = None) -> GateReport:
+    def run_gates(self, target_assertions: list[dict] | None = None,
+                  changed_files: list[str] | None = None,
+                  syntax_baseline: dict[str, set[str]] | None = None) -> GateReport:
         if not self.mode:
             raise SandboxError("create() first")
         report = GateReport()
-        self._gate_syntax(report)
+        self._gate_syntax(report, changed_files, syntax_baseline)
         self._gate_assertions(report, target_assertions)
         self._gate_regression(report)
         return report
@@ -171,8 +173,11 @@ class Sandbox:
 
     # ── gates ────────────────────────────────────────────────────────────────
 
-    def _gate_syntax(self, report: GateReport) -> None:
-        changed = [f for f in self._changed_files() if f.endswith(".gd")]
+    def _gate_syntax(self, report: GateReport,
+                     changed_files: list[str] | None = None,
+                     syntax_baseline: dict[str, set[str]] | None = None) -> None:
+        changed = [f for f in (changed_files or self._changed_files())
+                   if f.endswith(".gd")]
         if not changed:
             report.details.append("syntax: no .gd files changed")
             return
@@ -181,13 +186,25 @@ class Sandbox:
             report.syntax_ok = None
             report.details.append("syntax: Godot executable unavailable, gate skipped (infra)")
             return
+        # --check-only --script cannot resolve class_name globals, so pristine
+        # files may already show errors. The gate only fails on NEW errors.
+        baseline = syntax_baseline or {}
         failures = []
+        preexisting = 0
         for rel in changed:
-            r = godot_runner.run_script(str(self.path), str(self.path / rel))
-            if not r["success"] or r["errors"]:
-                failures.append(f"{rel}: {'; '.join(r['errors'][:3]) or r['output'][:200]}")
+            res_path = "res://" + rel.replace("\\", "/")
+            r = godot_runner.run_script(str(self.path), res_path)
+            errors = r["errors"] if r["errors"] else (
+                [] if r["success"] else [r["output"][:200]])
+            old = baseline.get(rel, set())
+            new_errors = [e for e in errors if e not in old]
+            preexisting += len(errors) - len(new_errors)
+            if new_errors:
+                failures.append(f"{rel}: {'; '.join(new_errors[:3])}")
         report.syntax_ok = not failures
-        report.details.append(f"syntax: {len(changed)} file(s) checked, {len(failures)} failed")
+        report.details.append(
+            f"syntax: {len(changed)} file(s) checked, {len(failures)} failed, "
+            f"{preexisting} pre-existing error(s) ignored")
         report.details.extend(failures)
 
     def _gate_assertions(self, report: GateReport, assertions: list[dict] | None) -> None:

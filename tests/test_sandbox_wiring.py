@@ -51,8 +51,14 @@ def _state_with_error(repo: Path) -> dict:
 
 class TestAutoFixPrepare(unittest.TestCase):
     def test_prepare_generates_candidates_in_sandbox(self):
-        with mock.patch("agents.auto_fix._generate_fixed_code",
-                        return_value="extends Node2D\nvar speed = 200\n"), \
+        fix_outcome = {
+            "file": "a.gd", "status": "fixed", "rounds_used": 1,
+            "gate_report": {}, "boundary": {"boundary_ok": True},
+            "fixed_code": "extends Node2D\nvar speed = 200\n",
+            "error": None, "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            "sandbox_path": None,
+        }
+        with mock.patch("agents.fix_agent.fix_file", return_value=fix_outcome), \
              mock.patch("tools.sandbox.Sandbox.run_gates", return_value=GREEN_GATES), \
              mock.patch("agents.llm_client.LLMClient", return_value=mock.Mock()):
             with _tmpdir_repo() as repo:
@@ -60,7 +66,10 @@ class TestAutoFixPrepare(unittest.TestCase):
                 result = auto_fix_prepare_node(state)
 
                 self.assertEqual(result["agent_status"]["auto_fix_prepare"], "ok")
-                self.assertEqual(result["fix_candidates"][0]["status"], "ready")
+                cand = result["fix_candidates"][0]
+                self.assertEqual(cand["status"], "ready")
+                self.assertEqual(cand["engine"], "fix_agent")
+                self.assertEqual(cand["rounds_used"], 1)
                 self.assertTrue(result["fix_gate_report"]["ok"])
                 # sandbox holds the fix; the real tree is untouched
                 sandbox_file = Path(result["sandbox_path"]) / "a.gd"
@@ -101,7 +110,9 @@ class TestHumanGateEvidence(unittest.TestCase):
 
         payload = intr.call_args.args[0]
         self.assertEqual(payload["sandbox_gates"], {"ok": True, "syntax_ok": True})
-        self.assertEqual(payload["fix_candidates"], [{"file": "a.gd", "status": "ready"}])
+        self.assertEqual(payload["fix_candidates"],
+                         [{"file": "a.gd", "status": "ready", "engine": None,
+                           "rounds_used": None, "boundary_ok": None}])
         self.assertTrue(result["auto_fix_approved"])
 
 

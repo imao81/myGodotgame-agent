@@ -1396,6 +1396,7 @@ def auto_fix_prepare_node(state: GameReport) -> dict:
             by_file.setdefault(f["file"], []).append(f)
 
     from agents.auto_fix import _generate_fixed_code
+    from agents.fix_agent import fix_file
     from agents.llm_client import LLMClient
     try:
         client = LLMClient(enable_fallback=True)
@@ -1415,16 +1416,35 @@ def auto_fix_prepare_node(state: GameReport) -> dict:
             candidates.append({"file": rel_path, "status": "failed",
                                "reason": "no LLM provider configured"})
             continue
+
+        # Primary engine: bounded fix-agent loop with surgical edit blocks
+        # and per-round gate feedback. Falls back to legacy whole-file
+        # generation so behavior is never worse than before.
+        outcome = fix_file(rel_path, issues, state["project_path"], client=client)
+        if outcome["status"] == "fixed":
+            target.write_text(outcome["fixed_code"], encoding="utf-8")
+            if outcome.get("sandbox_path"):
+                from tools.sandbox import Sandbox
+                Sandbox.discard_at(state["project_path"], outcome["sandbox_path"])
+            candidates.append({
+                "file": rel_path, "status": "ready", "issues": len(issues),
+                "engine": "fix_agent",
+                "rounds_used": outcome["rounds_used"],
+                "boundary_ok": outcome["boundary"].get("boundary_ok"),
+            })
+            continue
         try:
             fixed = _generate_fixed_code(
                 client, rel_path,
                 target.read_text(encoding="utf-8", errors="replace"), issues)
         except Exception as e:
             candidates.append({"file": rel_path, "status": "failed",
-                               "reason": f"LLM API error: {e}"})
+                               "reason": f"fix_agent: {outcome.get('error')}; "
+                                         f"legacy: {e}"})
             continue
         target.write_text(fixed, encoding="utf-8")
-        candidates.append({"file": rel_path, "status": "ready", "issues": len(issues)})
+        candidates.append({"file": rel_path, "status": "ready",
+                           "issues": len(issues), "engine": "legacy"})
 
     assertions = [f["assertion"] for f in errors if isinstance(f.get("assertion"), dict)]
     report = sb.run_gates(target_assertions=assertions)
@@ -1473,7 +1493,9 @@ def human_gate_node(state: GameReport) -> dict:
         # whether the prepared fixes pass the acceptance gates.
         "sandbox_gates": state.get("fix_gate_report") or {},
         "fix_candidates": [
-            {"file": c.get("file"), "status": c.get("status")}
+            {"file": c.get("file"), "status": c.get("status"),
+             "engine": c.get("engine"), "rounds_used": c.get("rounds_used"),
+             "boundary_ok": c.get("boundary_ok")}
             for c in state.get("fix_candidates", [])
         ],
     })

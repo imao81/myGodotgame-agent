@@ -691,6 +691,32 @@ produces a `fix.patch` artifact. Failure at any step just discards the sandbox;
 the real tree is never touched. Infra-unavailable gates (e.g. no Godot) are
 honestly skipped (`None`), never silently passed.
 
+## Fix Agent (bounded loop, verification-first)
+
+The repair path is a bounded feedback loop, not a one-shot rewrite: the model
+emits surgical edit blocks (`tools/patch_format.py` — ORIGINAL must match
+exactly once, hallucinated locations are rejected), each attempt runs the
+sandbox acceptance gates, and gate failures feed back as the next round's
+input (max 3 rounds, then honest failure). Each round restarts from the
+pristine file. Whole-file responses are tolerated only below a diff-ratio
+boundary — drive-by refactoring is measured, not assumed away.
+
+`eval/fix_benchmark.py` turns the mutation set around: each of the 26
+injected bugs is a fix task with built-in ground truth (the expected
+assertion must no longer reproduce after the fix). Metrics: fix rate, mean
+rounds, boundary violations, token cost — see `eval/results/fix_benchmark.*`.
+
+First run (26 mutants, single pass each arm):
+
+| arm | fix rate | mean rounds | boundary violations |
+|---|---|---|---|
+| deepseek-flash | **92.3%** (24/26) | 1.15 | 0 |
+| kimi-k3 | 76.9% (20/26) | 1.46 | 0 |
+
+Detection strength does not transfer to repair: the arm with higher review
+recall (k3, 88.5% vs 80.8%) is the *worse* fixer, driven by break_preload_path
+(1/5 vs 5/5). Single-run, n=26 — treat as signal, not proof.
+
 ## MCP Tool-Selection Eval
 
 Tool descriptions are prompts for the host model — so they get A/B-tested like

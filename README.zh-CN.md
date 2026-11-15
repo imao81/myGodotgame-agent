@@ -787,3 +787,5 @@ MIT License - 详见 LICENSE 文件。
 - [LangGraph](https://github.com/langchain-ai/langgraph) 做工作流编排
 - [Anthropic Claude](https://www.anthropic.com/claude) 与 [Moonshot Kimi](https://www.moonshot.cn/) 做 LLM 分析
 - Godot 4 CLI 做静态与运行时校验
+
+<!-- dogfood 2: verify LLM review path with valid key -->
